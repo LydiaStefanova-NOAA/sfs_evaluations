@@ -216,3 +216,13 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local Data Stores & Weights (CRUCIAL)
+*.zarr/
+*.nc
+*.nc4
+*.weights.nc
+local_data/
+processed_data/
+tmp/
+figures/
