@@ -29,26 +29,25 @@ The codebase follows a decoupled, modular design (**Ingest -> Preprocess -> Eval
 sfs_evaluations/
 ├── configs/                # Pipeline configurations (YAML)
 │   └── default_config.yaml
-├── sources/                # 1. DATA INGESTION ADAPTERS
-│   ├── base_adapter.py     # Abstract base class for data sources
-│   ├── sfs_adapter.py      # AWS S3 SFS Beta Zarr stream adapter
-│   ├── oras5_adapter.py    # ORAS5 Historical + Realtime combiner
-│   └── era5_adapter.py     # Local/CDS ERA5 atmospheric adapter
+├── sources/                # 1. DATA INGESTION
+│   ├── sfs.py              # AWS S3 SFS Beta Zarr loader & coord cleaner
+│   ├── oras5.py            # ECMWF ARCO ORAS5 Zarr loader
+│   └── era5.py             # ERA5 local/GCP loader
 ├── preprocess/             # 2. CORE TRANSFORMATION ENGINE
 │   ├── regrid.py           # xESMF spatial remapping & weight caching
-│   ├── vector_rotation.py  # Tripolar grid trigonometric vector rotations
-│   ├── time_coords.py      # Transforms (init + lead) -> valid_time
-│   └── zarr_writer.py      # Compressed local I/O engine
+│   ├── vector_rotation.py  # Tripolar grid vector rotation functions
+│   ├── time_coords.py      # Time axis parsing & alignment
+│   └── zarr_writer.py      # Compressed local I/O helpers
 ├── metrics/                # 3. VERIFICATION MATHEMATICS
-│   ├── climatology.py      # Reference baselines and anomaly calculations
-│   ├── deterministic.py    # Mean Bias, RMSE, Anomaly Correlation (ACC)
-│   └── sea_ice.py          # Sea Ice Extent (SIE) and spatial edge metrics
-├── viz/                    # 4. VISUALIZATION & PLOTTING
-│   ├── styles.py           # Publication styles & cmocean colormaps
-│   └── maps.py             # Cartopy spatial bias maps & lead-time skill curves
+│   ├── climatology.py      # Climatology and anomaly functions
+│   ├── deterministic.py    # Bias, RMSE, ACC calculation routines
+│   └── sea_ice.py          # Sea Ice Extent & edge error metrics
+├── viz/                    # 4. VISUALIZATION & PLOTTING SPECS
+│   ├── styles.py           # Shared cmocean colormaps & styling defaults
+│   └── maps.py             # Cartopy map generators & skill curve plots
 ├── utils/                  # GENERIC HELPERS
-│   ├── config_parser.py    # YAML configuration loader
-│   └── logging.py          # Formatted logging output
+│   ├── config_parser.py    # YAML parser function
+│   └── logging.py          # Clean logger setup
 ├── run_preprocessing.py    # CLI runner: Cloud/Raw -> Local Processed Zarr
 └── run_evaluation.py       # CLI runner: Processed Zarr -> Metrics & Plots
 ```

@@ -1,0 +1,164 @@
+"""
+Atmospheric Signal-to-Noise Ratio (SNR) Diagnostic Driver
+
+Workflow:
+  1. Load SFS atmospheric reforecast data (default: May initialization).
+  2. Preprocess coordinates and regrid to 1.0° target grid.
+  3. Compute lead-dependent forecast anomalies (relative to 1991-2020 baseline).
+  4. Optionally apply linear detrending across initialization years.
+  5. Select target lead time horizons:
+      - Lead 0 (single month: May)
+      - Lead 1-3 (seasonal average: June-July-August)
+  6. Calculate SNR (sigma_signal / sigma_noise) for TMP2m and Z500.
+  7. Plot 2x2 spatial diagnostic maps with SNR threshold contouring.
+"""
+import logging
+import matplotlib.pyplot as plt
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+import numpy as np
+import xarray as xr
+
+from sources.sfs import get_sfs_data
+from preprocess.pipeline import preprocess_atm_dataset
+from preprocess.climatology import compute_anomalies
+from preprocess.detrend import detrend_dim
+from preprocess.temporal import select_target_leads
+from metrics.snr import compute_signal_to_noise_ratio
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+def run_atm_snr_pipeline(
+    init_month: str = "05",
+    requested_vars: list[str] = ["TMP2m", "Z500"],
+    clim_years: tuple[int, int] = (1991, 2020),
+    detrend: bool = True,
+    target_lead_sets: list[tuple[str, list[int], bool]] = None,
+    output_png: str = "atm_snr_may_init.png",
+):
+    """
+    Execute full atmospheric SNR diagnostic pipeline.
+    """
+    if target_lead_sets is None:
+        target_lead_sets = [
+            ("Lead 0 (May)", [0], False),
+            ("Lead 1-3 (JJA)", [1, 2, 3], True),
+        ]
+
+    logger.info(f"=== Step 1: Loading Raw SFS Atmospheric Data (Init: {init_month}) ===")
+    ds_sfs_raw = get_sfs_data(
+        init_month=init_month,
+        domain="atm",
+        requested_vars=requested_vars,
+    )
+
+    logger.info("=== Step 2: Preprocessing Atmospheric Grid & Time Coordinates ===")
+    ds_sfs = preprocess_atm_dataset(ds_sfs_raw, target_res="1.0deg")
+
+    logger.info(f"=== Step 3: Computing Lead-Dependent Anomalies ({clim_years[0]}-{clim_years[1]} Baseline) ===")
+    ds_anom, ds_clim = compute_anomalies(ds_sfs, clim_years=clim_years)
+
+    if detrend:
+        logger.info("=== Step 4: Applying Linear Detrending Along Init Years ===")
+        ds_anom = detrend_dim(ds_anom, dim="init", deg=1)
+
+    logger.info("=== Step 5 & 6: Calculating SNR Across Variables and Lead Targets ===")
+    results = {}
+
+    for label, leads, average_flag in target_lead_sets:
+        ds_target = select_target_leads(ds_anom, leads=leads, average_seasonal=average_flag)
+        ds_snr = compute_signal_to_noise_ratio(ds_target, year_dim="init", member_dim="member")
+        results[label] = ds_snr
+
+    logger.info("=== Step 7: Plotting 2x2 Atmospheric SNR Diagnostic Maps ===")
+    plot_snr_grid(results, requested_vars, output_png=output_png)
+
+    return results
+
+
+def plot_snr_grid(
+    results: dict[str, xr.Dataset],
+    vars_to_plot: list[str],
+    output_png: str = "atm_snr_may_init.png",
+):
+    """
+    Generate a 2x2 grid plot of SNR spatial patterns.
+    """
+    labels = list(results.keys())
+
+    fig, axes = plt.subplots(
+        len(vars_to_plot), len(labels),
+        figsize=(16, 10),
+        squeeze=False,
+        subplot_kw={"projection": ccrs.PlateCarree()}
+    )
+
+    for i, var in enumerate(vars_to_plot):
+        for j, label in enumerate(labels):
+            ax = axes[i, j]
+            ds_snr = results[label]
+
+            # Filter out internal signal and noise variables
+            main_vars = [v for v in ds_snr.data_vars if not v.endswith("_signal") and not v.endswith("_noise")]
+
+            if not main_vars:
+                raise ValueError(f"No SNR variables found in results dataset. Variables: {list(ds_snr.data_vars)}")
+
+            if var in ds_snr.data_vars:
+                var_key = var
+            else:
+                idx = min(i, len(main_vars) - 1)
+                var_key = main_vars[idx]
+
+            snr_da = ds_snr[var_key].squeeze()
+
+            # Base map setup
+            ax.add_feature(cfeature.LAND, facecolor="lightgray", zorder=2)
+            ax.add_feature(cfeature.COASTLINE, linewidth=0.5, zorder=3)
+            ax.gridlines(draw_labels=True, linestyle=":", color="gray", alpha=0.5)
+
+            # Contour mesh for SNR values
+            im = ax.pcolormesh(
+                snr_da.lon, snr_da.lat, snr_da.values,
+                transform=ccrs.PlateCarree(),
+                cmap="YlOrRd",
+                vmin=0.0,
+                vmax=2.0,
+            )
+
+            # Highlight contour line where SNR = 1.0 (Signal equals Noise)
+            ax.contour(
+                snr_da.lon, snr_da.lat, snr_da.values,
+                levels=[1.0],
+                colors="black",
+                linewidths=1.2,
+                linestyles="--",
+                transform=ccrs.PlateCarree(),
+                zorder=4,
+            )
+
+            mean_snr = float(snr_da.mean().values)
+            max_snr = float(snr_da.max().values)
+
+            title_str = f"{var_key} SNR | {label}\n[Mean: {mean_snr:.2f} | Max: {max_snr:.2f}]"
+            ax.set_title(title_str, fontsize=11, fontweight="bold", pad=8)
+
+    # Shared colorbar
+    cbar_ax = fig.add_axes([0.25, 0.05, 0.50, 0.02])
+    fig.colorbar(im, cax=cbar_ax, orientation="horizontal", label="Signal-to-Noise Ratio (Dashed line: SNR = 1.0)")
+
+    plt.subplots_adjust(wspace=0.15, hspace=0.25, bottom=0.12)
+    plt.savefig(output_png, dpi=150, bbox_inches="tight")
+    plt.close()
+
+    logger.info(f"✅ Atmospheric SNR diagnostic plot saved to '{output_png}'!")
+
+
+if __name__ == "__main__":
+    run_atm_snr_pipeline(
+        init_month="05",
+        requested_vars=["TMP2m", "Z500"],
+        detrend=True,
+    )

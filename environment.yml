@@ -1,0 +1,44 @@
+name: sfs_evaluations
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  # --- Core Language Runtime ---
+  - python=3.12       # note: Stable build target for C-extension compatibility (cfgrib/eccodes)
+
+  # --- Core Data Structures & Storage I/O ---
+  - xarray            # note: Primary N-dimensional labeled array data model (dims, coords, attrs)
+  - zarr              # note: Storage engine for reading & writing chunked compressed datasets
+  - netcdf4           # note: Engine for reading and writing standard NetCDF files
+  - cfgrib            # note: Xarray engine for opening GRIB/GRIB2 weather & ocean files
+  - eccodes           # note: ECMWF C-library binary dependency required by cfgrib
+
+  # --- Cloud Streaming & Remote Datasets ---
+  - fsspec            # note: Unified abstract filesystem interface for local and cloud storage
+  - s3fs              # note: Amazon S3 plugin for streaming remote SFS datasets directly
+  - aiobotocore       # note: Async AWS SDK dependency required by s3fs (pinned alongside s3fs)
+  - botocore          # note: Low-level AWS SDK core library
+  - cdsapi            # note: Official client for downloading ERA5/ORAS5 from Copernicus CDS
+
+  # --- Parallelization & Performance ---
+  - dask              # note: Parallel execution engine & lazy loading for large out-of-core arrays
+  - bottleneck        # note: C-optimized array routines that accelerate xarray moving-window/NaN operations
+  - cftime            # note: Time-coordinate parser for non-standard calendars (360_day, noleap, etc.)
+
+  # --- Spatial Transformations & Numerical Math ---
+  - xesmf >= 0.8       # note: Regridding engine for regular and tripolar grid remapping
+  - esmf               # note: Earth System Modeling Framework C/Fortran core library
+  - esmpy              # note: Official Python bindings for ESMF required by xesmf
+  - numpy              # note: Base numerical array computation library
+  - scipy              # note: Scientific tools used for spatial interpolation & splines
+
+  # --- Visualization & Cartography ---
+  - matplotlib        # note: Core plotting framework for rendering figures and skill curves
+  - cartopy           # note: Map projection engine for global and polar stereographic spatial plots
+  - cmocean           # note: Specialized oceanographic and climate colormaps (SST, Ice, Salinity)
+
+  # --- Pipeline Architecture, Config & Tooling ---
+  - pyyaml            # note: Parser for loading defaults from configs/default_config.yaml
+  - pytest            # note: Unit testing framework for core regridding & vector rotation functions
+  - tqdm              # note: Progress bar display for terminal execution loops across years/months
+  - rich              # note: Rich terminal formatting and log output styling

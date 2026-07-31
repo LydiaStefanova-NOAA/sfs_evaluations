@@ -1,0 +1,49 @@
+"""
+Utilities for lead month selection and seasonal lead averaging.
+"""
+import logging
+import xarray as xr
+
+logger = logging.getLogger(__name__)
+
+
+def select_target_leads(
+    ds: xr.Dataset,
+    leads: int | list[int] | set[int],
+    average_seasonal: bool = False,
+) -> xr.Dataset:
+    """
+    Subset specific lead month(s) or average across a range of target leads.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Input dataset with 'lead' dimension.
+    leads : int or list/set of int
+        Target lead(s), e.g., 0 or [1, 2, 3].
+    average_seasonal : bool
+        If True and multiple leads are provided, computes the mean across those leads.
+
+    Returns
+    -------
+    xr.Dataset
+        Dataset containing selected or averaged lead(s).
+    """
+    if "lead" not in ds.dims:
+        return ds
+
+    if isinstance(leads, (int, float)):
+        leads_list = [int(leads)]
+    else:
+        leads_list = [int(l) for l in sorted(leads)]
+
+    logger.info(f"Selecting target lead(s): {leads_list}...")
+    ds_sub = ds.sel(lead=leads_list)
+
+    if average_seasonal and len(leads_list) > 1:
+        logger.info(f"Averaging across target leads {leads_list} (Seasonal Target)...")
+        # Compute mean across target leads and assign custom lead coordinate
+        ds_sub = ds_sub.mean(dim="lead", keep_attrs=True)
+        ds_sub = ds_sub.expand_dims({"lead": [f"{min(leads_list)}-{max(leads_list)}"]})
+
+    return ds_sub
