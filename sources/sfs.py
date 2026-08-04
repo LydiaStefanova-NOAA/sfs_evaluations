@@ -117,5 +117,10 @@ def get_sfs_data(
             ds = ds[matched_vars]
             if rename_map:
                 ds = ds.rename(rename_map)
+    # Inside get_sfs_data() in sources/sfs.py:
+
+    if "SSS" in requested_vars and "z_l" in ds.dims:
+        logger.info("Variable 'SSS' requested: selecting top surface level (z_l=0)...")
+        ds = ds.isel(z_l=0, drop=True)
 
     return ds

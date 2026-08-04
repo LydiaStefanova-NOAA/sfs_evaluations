@@ -54,7 +54,7 @@ def open_oras5(version: str = "consolidated", custom_url_or_path: str = None) ->
     Open ECMWF ORAS5 Zarr store from remote ARCO endpoint or local store.
     """
     target = custom_url_or_path or ORAS5_ENDPOINTS.get(version, ORAS5_ENDPOINTS["consolidated"])
-    logger.info(f"Opening ORAS5 store: {target}")
+    logger.info(f"Opening ORAS5 store ({version}): {target}")
 
     if target.startswith(("http://", "https://")):
         cds_key = _get_cds_api_key()
@@ -102,14 +102,58 @@ def standardize_oras5_coords(ds: xr.Dataset) -> xr.Dataset:
 
     return ds
 
+
+def _subset_requested_vars(ds: xr.Dataset, requested_vars: list[str]) -> xr.Dataset:
+    """Helper function to match and rename requested variables in a single dataset."""
+    if not requested_vars:
+        return ds
+
+    matched_vars = []
+    rename_vars = {}
+
+    for req in requested_vars:
+        if req in ds.data_vars:
+            matched_vars.append(req)
+        else:
+            candidates = ORAS5_VAR_MAP.get(req, [req])
+            found = False
+            for cand in candidates:
+                if cand in ds.data_vars:
+                    matched_vars.append(cand)
+                    rename_vars[cand] = req  # Standardize name to requested pipeline name
+                    found = True
+                    break
+            if not found:
+                logger.warning(f"Variable '{req}' not found in store.")
+
+    if matched_vars:
+        ds = ds[matched_vars]
+        if rename_vars:
+            ds = ds.rename(rename_vars)
+
+    return ds
+
+
 def get_oras5_data(
     requested_vars: list[str] | str = None,
-    version: str = "consolidated", 
+    version: str | list[str] = "both", 
     custom_url_or_path: str = None,
     **kwargs,
 ) -> xr.Dataset:
     """
-    High-level function to load, clean, and subset ORAS5 reanalysis data.
+    High-level function to load, clean, concatenate, and subset ORAS5 reanalysis data.
+
+    Parameters
+    ----------
+    requested_vars : list[str] | str, optional
+        List of variable names or pipeline aliases to retrieve.
+    version : str | list[str], default "both"
+        "both" or "combined" -> loads and concatenates 'consolidated' and 'operational'.
+        "consolidated" -> loads only the consolidated endpoint.
+        "operational" -> loads only the operational endpoint.
+        Or a list of keys, e.g. ["consolidated", "operational"].
+    custom_url_or_path : str, optional
+        Custom path or URL to override endpoints (used only when single dataset is loaded).
     """
     if requested_vars is None and "var_name" in kwargs:
         requested_vars = kwargs["var_name"]
@@ -117,31 +161,31 @@ def get_oras5_data(
     if isinstance(requested_vars, str):
         requested_vars = [requested_vars]
 
-    ds = open_oras5(version=version, custom_url_or_path=custom_url_or_path)
-    ds = standardize_oras5_coords(ds)
+    # Resolve target versions to load
+    if version in ("both", "combined", "all"):
+        versions_to_load = ["consolidated", "operational"]
+    elif isinstance(version, (list, tuple)):
+        versions_to_load = list(version)
+    else:
+        versions_to_load = [version]
 
-    if requested_vars:
-        matched_vars = []
-        rename_vars = {}
+    loaded_datasets = []
 
-        for req in requested_vars:
-            if req in ds.data_vars:
-                matched_vars.append(req)
-            else:
-                candidates = ORAS5_VAR_MAP.get(req, [req])
-                found = False
-                for cand in candidates:
-                    if cand in ds.data_vars:
-                        matched_vars.append(cand)
-                        rename_vars[cand] = req  # Standardize name to requested pipeline name
-                        found = True
-                        break
-                if not found:
-                    logger.warning(f"Variable '{req}' not found in ORAS5 store.")
+    for v in versions_to_load:
+        path_override = custom_url_or_path if len(versions_to_load) == 1 else None
+        ds = open_oras5(version=v, custom_url_or_path=path_override)
+        ds = standardize_oras5_coords(ds)
+        ds = _subset_requested_vars(ds, requested_vars)
+        loaded_datasets.append(ds)
 
-        if matched_vars:
-            ds = ds[matched_vars]
-            if rename_vars:
-                ds = ds.rename(rename_vars)
+    # Return single dataset directly or concatenate along time
+    if len(loaded_datasets) == 1:
+        return loaded_datasets[0]
 
-    return ds
+    logger.info("Concatenating ORAS5 stores along the 'time' dimension...")
+    combined_ds = xr.concat(loaded_datasets, dim="time", data_vars="minimal", coords="minimal", compat="override")
+    
+    # Remove potential duplicate timestamps between historical and operational data
+    combined_ds = combined_ds.drop_duplicates(dim="time").sortby("time")
+
+    return combined_ds
