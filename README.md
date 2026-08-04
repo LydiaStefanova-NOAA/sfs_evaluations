@@ -1,6 +1,6 @@
 # sfs_evaluations
 
-An abstract, modular verification framework for evaluating NOAA SFS (Subseasonal Forecast System) Beta ocean, sea ice, and atmospheric forecasts against observational reanalyses (**ORAS5** for ocean/ice and **ERA5** for atmosphere).
+*** IN PROGRESS *** Eventually, a modular verification framework for evaluating NOAA SFS (Subseasonal Forecast System) monthly ocean, sea ice, and atmospheric forecasts against observational reanalyses (**ORAS5** for ocean/ice and **ERA5** for atmosphere).
 
 ---
 
@@ -23,33 +23,43 @@ This toolset ingests cloud-hosted and local reanalysis datasets, standardizes sp
 
 ## 🏗 Repository Architecture
 
-The codebase follows a decoupled, modular design (**Ingest -> Preprocess -> Evaluate -> Visualize**):
+The codebase will eventually follow a decoupled, modular design (**Ingest -> Preprocess -> Evaluate -> Visualize**):
 
 ```text
 sfs_evaluations/
 ├── configs/                # Pipeline configurations (YAML)
 │   └── default_config.yaml
 ├── sources/                # 1. DATA INGESTION
-│   ├── sfs.py              # AWS S3 SFS Beta Zarr loader & coord cleaner
+│   ├── sfs.py              # AWS S3 SFS Beta Zarr loader 
 │   ├── oras5.py            # ECMWF ARCO ORAS5 Zarr loader
-│   └── era5.py             # ERA5 local/GCP loader
+│   └── era5.py             # ERA5 local Zarr loader
 ├── preprocess/             # 2. CORE TRANSFORMATION ENGINE
+│   ├── cache.py            # Retrieve/write climatology and trend (model & obs)
+|   ├── climatology.py      # Lead dependent climatology and anomalies
+|   ├── detrend.py          # Grid-point detrending
+|   ├── engine.py           # Preprocessing/loading engine. Uses preprocess/pipeline.py
+|   ├── pipeline.py         # Unified preprocessing pipeline workflows for evaluations
 │   ├── regrid.py           # xESMF spatial remapping & weight caching
-│   ├── vector_rotation.py  # Tripolar grid vector rotation functions
+|   ├── temporal.py         # Temporal selection, lead time mapping, and seasonal aggregation utilities.
 │   ├── time_coords.py      # Time axis parsing & alignment
-│   └── zarr_writer.py      # Compressed local I/O helpers
+|   ├── vector_rotation.py  # Tripolar grid vector rotation functions
+│   └── zarr_writer.py      # Compressed local I/O helpers (**TBD**)
 ├── metrics/                # 3. VERIFICATION MATHEMATICS
-│   ├── climatology.py      # Climatology and anomaly functions
-│   ├── deterministic.py    # Bias, RMSE, ACC calculation routines
-│   └── sea_ice.py          # Sea Ice Extent & edge error metrics
+|   ├── acc.py              # Anomaly Correlation Coefficient
+│   ├── snr.py              # Signal-to-noise ratio and related concepts
+│   └── (**TBD**)
 ├── viz/                    # 4. VISUALIZATION & PLOTTING SPECS
 │   ├── styles.py           # Shared cmocean colormaps & styling defaults
 │   └── maps.py             # Cartopy map generators & skill curve plots
+│   └── spatial.py          # Several extremely specific multi-panel compositions
 ├── utils/                  # GENERIC HELPERS
-│   ├── config_parser.py    # YAML parser function
-│   └── logging.py          # Clean logger setup
-├── run_preprocessing.py    # CLI runner: Cloud/Raw -> Local Processed Zarr
-└── run_evaluation.py       # CLI runner: Processed Zarr -> Metrics & Plots
+│   ├── config_parser.py    # YAML parser function (**TBD**)
+│   └── logging.py          # Clean logger setup (**TBD**)
+├── run_preprocessing.py    # CLI runner: Cloud/Raw -> Local Processed Zarr (**TBD**)
+└── run_evaluation.py       # CLI runner: Processed Zarr -> Metrics & Plots (**TBD**)
+└── test_unified_snr_acc.py # Misnomer -> creates various maps related to skill, predictability, spread
+└── breakdown.py            # --> creates maps of (model external variance) vs (observed variance) and
+                            # (model internal variance) vs (mean squared error)
 ```
 
 ---
@@ -80,20 +90,20 @@ sfs_evaluations/
    conda activate sfs_evaluations
    ```
 
-3. **Configure local paths:**
+3. **Configure local paths:** **TBD**
    Edit `configs/default_config.yaml` to specify your target local directories for output Zarr stores (`local_data/`) and figures (`figures/`).
 
 ---
 
 ## 🚀 Execution Pipeline
 
-### Phase 1: Preprocessing & Regridding
+### Phase 1: Preprocessing & Regridding. **TBD**
 Process raw cloud/remote datasets down to standardized, compressed local Zarr stores:
 ```bash
 python run_preprocessing.py --config configs/default_config.yaml --domain all
 ```
-
-### Phase 2: Evaluation & Plotting
+ 
+### Phase 2: Evaluation & Plotting **TBD**
 Compute verification metrics (Bias, RMSE, ACC) and generate diagnostic spatial maps and skill curves:
 ```bash
 python run_evaluation.py --config configs/default_config.yaml --init-month 05
@@ -103,4 +113,4 @@ python run_evaluation.py --config configs/default_config.yaml --init-month 05
 
 ## 📝 Acknowledgment & Disclaimer
 
-This software framework was developed with the assistance of an AI collaborator (Gemini) under human technical direction, architectural design, and scientific supervision. All mathematical formulations, physical grid transformations, and domain logic were reviewed and verified by the primary maintainer.
+This software framework was developed with the assistance of an AI collaborator (Gemini) under human technical direction and scientific supervision. All mathematical formulations, physical grid transformations, and assembling logic were reviewed and verified by the human author.
