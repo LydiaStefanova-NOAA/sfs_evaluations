@@ -1,6 +1,12 @@
 # sfs_evaluations
 
-*** **IN PROGRESS** *** Eventually, a modular verification framework for evaluating NOAA SFS (Subseasonal Forecast System) monthly ocean, sea ice, and atmospheric forecasts against observational reanalyses (**ORAS5** for ocean/ice and **ERA5** for atmosphere).
+**UNDER CONSTRUCTION** This repository is under construction. Much more testing is required. Eventual goal is a modular verification framework for evaluating NOAA SFS (Subseasonal Forecast System) monthly ocn, ice, atm forecasts against observational reanalyses (**ORAS5** for ocean/ice and **ERA5** for atmosphere).
+
+**KNOWN ISSUES (Aug 4, 2026)** 
+* OOM errors when attempting ice evaluation
+* Problematic for some target months: e.g., target months [6,7,8] are ok for init 05 and init 11; target months [12] is ok for init 05 and init 11; BUT target months [12,1,2] or [1,2,3] produce unreasonable results
+* Organization: e.g. climatology calculations in preprocess or metrics?
+* Tests directory containing initial sanity checks for new logig not tested after updates, unlikely to work
 
 ---
 
@@ -15,9 +21,9 @@ This toolset ingests cloud-hosted and local reanalysis datasets, standardizes sp
   * **Sea Ice:** 0.25° x 0.25° (721 x 1440)
   * **Ocean:** 1.0° x 1.0° (181 x 360)
   * **Atmosphere:** 1.0° x 1.0° (181 x 360)
-* **Schema Drift Handling:** Gracefully adapts to varying variable availability across initialization months (e.g., initializations `03` and `04` vs. `05+`).
+* **Schema Change Handling:** Gracefully (?) adapts to varying variable availability across initialization months (e.g., initializations `03` and `04` vs. `05+`).
 * **Compressed Local Storage:** Precomputes and saves intermediate "verification-ready" datasets locally using Blosc/Zstandard compressed Zarr stores.
-* **Multi-Initialization Support:** Loops across all SFS Beta reforecast initialization months (`03`, `04`, `05`, `06`, `07`, `08`, `11`), dynamically handling variable schema drift across runs.
+* **Multi-Initialization Support:** Can loop across all SFS Beta reforecast initialization months (`03`, `04`, `05`, `06`, `07`, `08`, `11`), dynamically handling variable schema changes across runs.
 
 ---
 
@@ -64,7 +70,7 @@ sfs_evaluations/
 
 ---
 
-## 📊 Dataset Specifications
+## 📊 Dataset Specifications --- **TBD: Update variable names**
 
 | Dataset | Domain | Source Location | Target Grid | Key Variables |
 | :--- | :--- | :--- | :--- | :--- |
