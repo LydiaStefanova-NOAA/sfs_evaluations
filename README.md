@@ -1,6 +1,6 @@
 # sfs_evaluations
 
-*** IN PROGRESS *** Eventually, a modular verification framework for evaluating NOAA SFS (Subseasonal Forecast System) monthly ocean, sea ice, and atmospheric forecasts against observational reanalyses (**ORAS5** for ocean/ice and **ERA5** for atmosphere).
+*** **IN PROGRESS** *** Eventually, a modular verification framework for evaluating NOAA SFS (Subseasonal Forecast System) monthly ocean, sea ice, and atmospheric forecasts against observational reanalyses (**ORAS5** for ocean/ice and **ERA5** for atmosphere).
 
 ---
 
@@ -97,13 +97,13 @@ sfs_evaluations/
 
 ## 🚀 Execution Pipeline
 
-### Phase 1: Preprocessing & Regridding. **TBD**
+### Phase 1: Preprocessing & Regridding. --- **TBD**
 Process raw cloud/remote datasets down to standardized, compressed local Zarr stores:
 ```bash
 python run_preprocessing.py --config configs/default_config.yaml --domain all
 ```
  
-### Phase 2: Evaluation & Plotting **TBD**
+### Phase 2: Evaluation & Plotting --- **TBD**
 Compute verification metrics (Bias, RMSE, ACC) and generate diagnostic spatial maps and skill curves:
 ```bash
 python run_evaluation.py --config configs/default_config.yaml --init-month 05
