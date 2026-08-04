@@ -6,6 +6,7 @@
 * OOM errors when attempting ice evaluation
 * Target months hardwired in breakdown.py and test_unified_acc_snr.py
 * Problematic for some target months: e.g., target months [6,7,8] are ok for init 05 and init 11; target months [12] is ok for init 05 and init 11; BUT target months [12,1,2] or [1,2,3] produce unreasonable results
+* Configs?
 * Organization: e.g. climatology calculations in preprocess or metrics?
 * Tests directory containing initial sanity checks for new logig not tested after updates, unlikely to work
 
@@ -28,9 +29,9 @@ This toolset ingests cloud-hosted and local reanalysis datasets, standardizes sp
 
 ---
 
-## 🏗 Repository Architecture
+## Repository Structure
 
-The codebase will eventually follow a decoupled, modular design (**Ingest -> Preprocess -> Evaluate -> Visualize**):
+Striving for modular design (**Ingest (sources/) -> Preprocess (preprocess/) -> Evaluate (metrics/) -> Visualize (viz/)**):
 
 ```text
 sfs_evaluations/
@@ -62,28 +63,30 @@ sfs_evaluations/
 ├── utils/                  # GENERIC HELPERS
 │   ├── config_parser.py    # YAML parser function (**TBD**)
 │   └── logging.py          # Clean logger setup (**TBD**)
-├── run_preprocessing.py    # CLI runner: Cloud/Raw -> Local Processed Zarr (**TBD**)
-└── run_evaluation.py       # CLI runner: Processed Zarr -> Metrics & Plots (**TBD**)
+│
 └── test_unified_snr_acc.py # Misnomer -> creates various maps related to skill, predictability, spread
-└── breakdown.py            # --> creates maps of (model external variance) vs (observed variance) and
+└── breakdown.py            #          -> creates maps of (model external variance) vs (observed variance) and
                             # (model internal variance) vs (mean squared error)
 ```
 
 ---
 
-## 📊 Dataset Specifications --- **TBD: Update variable names**
+## Dataset Specifications --- **TBD: Update variable names**
 
-| Dataset | Domain | Source Location | Target Grid | Key Variables |
-| :--- | :--- | :--- | :--- | :--- |
-| **SFS Beta** | Sea Ice | AWS S3 Zarr | 0.25° Regular | `aice_h`, `hi_h`, `uvel_h`, `vvel_h` |
-| **SFS Beta** | Ocean | AWS S3 Zarr | 1.0° Regular | `SST`, `SSH`, `ocnheat`, `dt20c`, `so` (3D) |
-| **SFS Beta** | Atmosphere | AWS S3 Zarr | 1.0° Regular | `z500`, `t2m`, `prmsl`, `u10`, `v10` |
-| **ORAS5** | Ice & Ocean | ECMWF / Local Zarr | Native -> Target | `ileadfra`, `iicethic`, `sosstsst`, `sossheig`, `sohtc300` |
-| **ERA5** | Atmosphere | Local Zarr / CDS | 0.25° -> 1.0° | `z500`, `t2m`, `msl`, `u10`, `v10` |
+Default sources, and variables overlapping between SFS Beta and the default sources' analyses:
+
+| Dataset | Domain | Source Location | Incoming Grid | Target Grid | Key Variables|
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **SFS Beta** | Sea Ice | AWS S3 Zarr | ?? | 0.25° Regular | `aice_h`, `hi_h`, `uvel_h`, `vvel_h` |
+| **SFS Beta** | Ocean | AWS S3 Zarr | 1.0° Regular | 1.0° Regular | `SST`, `SSH`, `SSS`, `ocnheat`, `dt20c`, `MLD003` |
+| **SFS Beta** | Atmosphere | AWS S3 Zarr | 0.5° Regular | 1.0° Regular | `z500`, `U/V200`, `U/V850`,`TMP2m`, `MSLP`, `U10m`, `V10m` |
+| **ORAS5** | Ice  | ECMWF  |  ?? | 0.25° Regular | `ileadfra`, `iicethic`, `sosstsst`, `sossheig`, `sohtc300` |
+| **ORAS5** | Ocean  | ECMWF  | ?? | 1° Regular | `ileadfra`, `iicethic`, `sosstsst`, `sossheig`, `sohtc300` |
+| **ERA5** | Atmosphere | Local Zarr | 1.0° Regular | 1.0° Regular | `z500`, `t2m`, `msl`, `u10`, `v10` |
 
 ---
 
-## ⚙️ Installation & Setup
+## Installation 
 
 1. **Clone the repository:**
    ```bash
@@ -97,27 +100,15 @@ sfs_evaluations/
    conda activate sfs_evaluations
    ```
 
-3. **Configure local paths:** **TBD**
-   Edit `configs/default_config.yaml` to specify your target local directories for output Zarr stores (`local_data/`) and figures (`figures/`).
-
 ---
 
-## 🚀 Execution Pipeline
+## Execution 
 
-### Phase 1: Preprocessing & Regridding. --- **TBD**
-Process raw cloud/remote datasets down to standardized, compressed local Zarr stores:
-```bash
-python run_preprocessing.py --config configs/default_config.yaml --domain all
-```
+See bash scripts.
  
-### Phase 2: Evaluation & Plotting --- **TBD**
-Compute verification metrics (Bias, RMSE, ACC) and generate diagnostic spatial maps and skill curves:
-```bash
-python run_evaluation.py --config configs/default_config.yaml --init-month 05
-```
 
 ---
 
-## 📝 Acknowledgment & Disclaimer
+## Acknowledgment & Disclaimer
 
 This software framework was developed with the assistance of an AI collaborator (Gemini) under human technical direction and scientific supervision. All mathematical formulations, physical grid transformations, and assembling logic were reviewed and verified by the human author.
