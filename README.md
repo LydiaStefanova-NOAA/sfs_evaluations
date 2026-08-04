@@ -4,6 +4,7 @@
 
 **KNOWN ISSUES (Aug 4, 2026)** 
 * OOM errors when attempting ice evaluation
+* Target months hardwired in breakdown.py and test_unified_acc_snr.py
 * Problematic for some target months: e.g., target months [6,7,8] are ok for init 05 and init 11; target months [12] is ok for init 05 and init 11; BUT target months [12,1,2] or [1,2,3] produce unreasonable results
 * Organization: e.g. climatology calculations in preprocess or metrics?
 * Tests directory containing initial sanity checks for new logig not tested after updates, unlikely to work
