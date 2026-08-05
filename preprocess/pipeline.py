@@ -5,6 +5,7 @@ import logging
 import xarray as xr
 from preprocess.time_coords import add_valid_time
 from preprocess.regrid import regrid_dataset
+from preprocess.vector_rotation import rotate_tripolar_vectors  # NEW
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -15,9 +16,10 @@ def preprocess_ice_dataset(
     target_res: str = "0.25deg",
     regrid_method: str = "bilinear",
     ice_threshold: float = 0.15,
+    static_grid_path: str | None = None,  # NEW
 ) -> xr.Dataset:
     """
-    Preprocess Sea Ice datasets (coordinate standardization, time alignment, masking, regridding).
+    Preprocess Sea Ice datasets (coordinate standardization, time alignment, vector rotation, masking, regridding).
     """
     logger.info("--- Starting Sea Ice Preprocessing Pipeline ---")
 
@@ -31,6 +33,22 @@ def preprocess_ice_dataset(
     drop_u_coords = [c for c in ["ULON", "ULAT"] if c in ds.coords or c in ds.data_vars]
     if drop_u_coords:
         ds = ds.drop_vars(drop_u_coords)
+
+    # NEW: rotate ice velocity vectors on tripolar grid, if present
+    if "uvel_h" in ds.data_vars and "vvel_h" in ds.data_vars:
+        if static_grid_path is None:
+            logger.warning(
+                "uvel_h/vvel_h found but static_grid_path is None; skipping vector rotation."
+            )
+        else:
+            logger.info("Rotating tripolar ice velocities to east/north using static grid...")
+            u_east, v_north = rotate_tripolar_vectors(
+                ds["uvel_h"],
+                ds["vvel_h"],
+                static_grid_path=static_grid_path,
+            )
+            ds["uvel_h"] = u_east
+            ds["vvel_h"] = v_north
 
     if "init" in ds.coords and "lead" in ds.coords and "valid_time" not in ds.coords:
         logger.info("Step 1/2: Attaching 2D valid_time coordinate matrix...")
@@ -47,8 +65,7 @@ def preprocess_ice_dataset(
                 ds_out[var] = ds_out[var].where(ice_mask)
 
     logger.info("--- Sea Ice Preprocessing Pipeline Complete ---")
-    return ds_out
-
+    return ds_outo
 def preprocess_ocn_dataset(
     ds: xr.Dataset,
     target_res: str = "1.0deg",
