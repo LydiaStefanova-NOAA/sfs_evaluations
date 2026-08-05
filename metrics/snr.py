@@ -54,7 +54,11 @@ def compute_snr(
     noise_var = internal_var.mean(dim=year_dim, skipna=True)
 
     # 4. Unbiased Signal Variance (1/M noise correction)
-    unbiased_sig_var = (total_ens_var - (noise_var / M)).clip(min=0.0)
+    #unbiased_sig_var = (total_ens_var - (noise_var / M)).clip(min=0.0)
+    unbiased_sig_var = (total_ens_var - (noise_var / M))
+    #raw_sig_var = total_ens_var - (noise_var / M)
+    #pct_clipped = (raw_sig_var < 0).mean().values * 100
+    #print(f"Percentage of spatial grid points clipped to 0: {pct_clipped:.1f}%")
 
     # 5. Lightweight Masking (Standard Xarray .where on noise_var threshold)
     snr_var = unbiased_sig_var / noise_var.where(noise_var > 0)
@@ -90,6 +94,9 @@ def compute_rpc(acc_da: xr.DataArray, rpot_da: xr.DataArray) -> xr.DataArray:
     # Guard against division by zero or extremely low potential skill
     rpot_guarded = rpot_da.where(rpot_da > 0.001)
     rpc = acc_da / rpot_guarded
+
+    rpc = rpc.where(acc_da >= 0.3) # mask out places where the RPC is irrelevant (ACC insignificant)
+
     
     rpc.name = "rpc"
     rpc.attrs["long_name"] = "Ratio of Predictable Components (RPC)"
