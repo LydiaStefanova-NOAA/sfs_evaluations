@@ -2,10 +2,8 @@
 
 **UNDER CONSTRUCTION** This repository is under construction. Much more testing is required. Eventual goal is a modular verification framework for evaluating NOAA SFS (Subseasonal Forecast System) monthly ocn, ice, atm forecasts against observational reanalyses (**ORAS5** for ocean/ice and **ERA5** for atmosphere).
 
-**KNOWN ISSUES (Aug 4, 2026)** 
-* OOM errors when attempting ice evaluation
-* Target months hardwired in breakdown.py and test_unified_acc_snr.py
-* Problematic for some target months: e.g., target months [6,7,8] are ok for init 05 and init 11; target months [12] is ok for init 05 and init 11; BUT target months [12,1,2] or [1,2,3] produce unreasonable results
+**KNOWN ISSUES (Aug 5, 2026)** 
+* OOM errors can happen when attempting ice evaluation
 * Configs?
 * Organization: e.g. climatology calculations in preprocess or metrics?
 * Tests directory containing initial sanity checks for new logig not tested after updates, unlikely to work
