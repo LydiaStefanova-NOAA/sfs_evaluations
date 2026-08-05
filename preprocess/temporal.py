@@ -3,6 +3,7 @@ Temporal selection, lead time mapping, and seasonal aggregation utilities.
 """
 import logging
 import xarray as xr
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -90,3 +91,51 @@ def select_target_leads(
         ds_subset = ds_subset.mean(dim="lead", keep_attrs=True)
 
     return ds_subset
+
+def seasonal_mean_by_target_months(
+    da: xr.DataArray,
+    target_months: list[int],
+    time_dim: str = "time",
+    require_complete: bool = True,
+) -> xr.DataArray:
+    """
+    Compute seasonal means for arbitrary target months with correct season-year handling.
+
+    - For cross-year seasons (e.g., [12,1,2]), December is assigned to the following year.
+    - Returns DataArray with dimension 'year' (plus non-time dims).
+    - If require_complete=True, drops years missing one or more target months.
+    """
+    months = [int(m) for m in target_months]
+    if len(months) == 0:
+        raise ValueError("target_months must not be empty.")
+    if any((m < 1 or m > 12) for m in months):
+        raise ValueError(f"Invalid month(s) in target_months: {target_months}")
+
+    months_unique = sorted(set(months))
+    base = da.where(da[time_dim].dt.month.isin(months_unique), drop=True)
+
+    # Cross-year if December plus any earlier month
+    crosses_year = (12 in months_unique) and any(m < 12 for m in months_unique)
+
+    season_year = base[time_dim].dt.year.astype(int)
+    if crosses_year:
+        season_year = season_year + (base[time_dim].dt.month == 12)
+
+    season_year = season_year.rename("year")
+
+    seasonal = base.groupby(season_year).mean(dim=time_dim, skipna=True)
+
+    if require_complete:
+        # Count unique contributing months per year; keep only full seasons
+        month_da = xr.DataArray(
+            base[time_dim].dt.month.values,
+            coords={time_dim: base[time_dim]},
+            dims=[time_dim],
+        )
+        month_counts = month_da.groupby(season_year).map(
+            lambda x: xr.DataArray(len(np.unique(x.values)))
+        )
+        valid_years = month_counts["year"].where(month_counts >= len(months_unique), drop=True)
+        seasonal = seasonal.sel(year=valid_years.values)
+
+    return seasonal

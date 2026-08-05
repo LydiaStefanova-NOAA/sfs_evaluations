@@ -17,7 +17,8 @@ from preprocess.pipeline import (
     preprocess_ocn_dataset,
 )
 from preprocess.cache import get_or_compute_sfs_climatology
-from preprocess.temporal import resolve_target_season_leads, get_season_name
+from preprocess.temporal import resolve_target_season_leads, get_season_name, seasonal_mean_by_target_months
+
 
 # Metrics & Viz
 from metrics.acc import compute_acc
@@ -108,8 +109,13 @@ def run_acc_snr_diagnostic(
     # 2. Ingest Observations
     ds_obs_raw = OBS_DATA_MAP[comp](requested_vars=[var_name])
     ds_obs_base = ds_obs_raw.sel(time=slice(str(start_year), str(end_year)))
-    obs_season = ds_obs_base.where(ds_obs_base["time.month"].isin(target_months), drop=True)
-    obs_season_da = obs_season[var_name].groupby("time.year").mean(dim="time", skipna=True)
+    obs_season_da = seasonal_mean_by_target_months(
+    ds_obs_base[var_name],
+    target_months=target_months,
+    time_dim="time",
+    require_complete=True,
+)
+
     obs_clim_da = obs_season_da.mean(dim="year", skipna=True)
 
     # 3. Standardize dimensions & coerce years
@@ -201,6 +207,7 @@ if __name__ == "__main__":
     parser.add_argument("--component", "-c", type=str, default="atm", choices=["atm", "ice", "ocn"])
     parser.add_argument("--var", "-v", type=str, default=None)
     parser.add_argument("--init", "-i", type=int, default=5)
+    parser.add_argument("--target", "-t", type=int, nargs="+", default=[1, 2, 3])
     parser.add_argument("--start-year", type=int, default=1991)
     parser.add_argument("--end-year", type=int, default=2022)
     parser.add_argument("--no-detrend", action="store_true")
@@ -212,6 +219,7 @@ if __name__ == "__main__":
         component=args.component,
         var_name=args.var,
         init_month=args.init,
+        target_months=args.target,
         start_year=args.start_year,
         end_year=args.end_year,
         detrend=not args.no_detrend,

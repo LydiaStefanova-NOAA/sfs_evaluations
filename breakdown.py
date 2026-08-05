@@ -22,7 +22,8 @@ from preprocess.pipeline import (
     preprocess_ice_dataset,
     preprocess_ocn_dataset,
 )
-from preprocess.temporal import resolve_target_season_leads, get_season_name
+
+from preprocess.temporal import resolve_target_season_leads, get_season_name, seasonal_mean_by_target_months
 from metrics.snr import _linear_detrend
 from viz.spatial import _prepare_cyclic_grid, LAND_GRAY
 
@@ -226,10 +227,14 @@ def run_variance_diagnostic_cli(
     ds_obs_raw = OBS_DATA_MAP[comp](requested_vars=[var_name])
 
     sfs_season_da = ds_sfs[var_name].sel(lead=leads).mean(dim="lead", skipna=True)
-    obs_season = ds_obs_raw.sel(time=slice(str(start_year), str(end_year)))
-    obs_season = obs_season.where(obs_season["time.month"].isin(target_months), drop=True)
-    obs_season_da = obs_season[var_name].groupby("time.year").mean(dim="time", skipna=True)
+    obs_base = ds_obs_raw.sel(time=slice(str(start_year), str(end_year)))
 
+    obs_season_da = seasonal_mean_by_target_months(
+        obs_base[var_name],
+        target_months=target_months,
+        time_dim="time",
+        require_complete=True,
+    )
     # 3. Standardize dimensions & coerce years
     if "init" in sfs_season_da.dims and "year" not in sfs_season_da.dims:
         sfs_season_da = sfs_season_da.rename({"init": "year"})
@@ -287,6 +292,7 @@ if __name__ == "__main__":
     parser.add_argument("--component", "-c", type=str, default="ocn", choices=["atm", "ice", "ocn"])
     parser.add_argument("--var", "-v", type=str, default=None)
     parser.add_argument("--init", "-i", type=int, default=5)
+    parser.add_argument("--target", "-t", type=int, nargs="+", default=[1, 2, 3])
     parser.add_argument("--start-year", type=int, default=1991)
     parser.add_argument("--end-year", type=int, default=2022)
     parser.add_argument("--no-detrend", action="store_true")
@@ -297,6 +303,7 @@ if __name__ == "__main__":
         component=args.component,
         var_name=args.var,
         init_month=args.init,
+        target_months=args.target,
         start_year=args.start_year,
         end_year=args.end_year,
         detrend=not args.no_detrend,
