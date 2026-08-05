@@ -1,11 +1,12 @@
 """
 Unified ACC Skill & SNR Potential Predictability Diagnostic Driver
+Lead-first capable: allows explicit lead selection to avoid month/year ambiguity.
 """
 import argparse
 import logging
-import os
 import warnings
 import numpy as np
+import xarray as xr
 
 # Source Loaders & Pipelines
 from sources.sfs import get_sfs_data
@@ -16,9 +17,12 @@ from preprocess.pipeline import (
     preprocess_ice_dataset,
     preprocess_ocn_dataset,
 )
-from preprocess.cache import get_or_compute_sfs_climatology
-from preprocess.temporal import resolve_target_season_leads, get_season_name, seasonal_mean_by_target_months
-
+from preprocess.temporal import (
+    resolve_target_season_leads,
+    get_season_name,
+    leads_to_target_months,
+    seasonal_mean_obs_by_init_and_leads,
+)
 
 # Metrics & Viz
 from metrics.acc import compute_acc
@@ -35,7 +39,6 @@ DOMAIN_VARS = {
     "ocn": ["SST", "SSH", "SSS", "MLD_003", "MLD_0125", "dt20c", "ocnheat", "taux", "tauy"],
     "ice": ["aice_h", "hi_h", "hs_h", "Tsfc_h", "uvel_h", "vvel_h"],
 }
-
 PREPROCESS_MAP = {"atm": preprocess_atm_dataset, "ice": preprocess_ice_dataset, "ocn": preprocess_ocn_dataset}
 OBS_DATA_MAP = {"atm": get_era5_data, "ice": get_oras5_data, "ocn": get_oras5_data}
 OBS_NAME_MAP = {"atm": "ERA5", "ice": "ORAS5", "ocn": "ORAS5"}
@@ -46,13 +49,14 @@ DEFAULT_VARS = {"atm": "TMP2m", "ice": "aice_h", "ocn": "dt20c"}
 def run_acc_snr_diagnostic(
     component: str = "atm",
     var_name: str = None,
-    target_months: list[int] = [6, 7, 8],
+    target_months: list[int] = [6, 7, 8],   # legacy path
     init_month: int = 5,
     start_year: int = 1991,
     end_year: int = 2022,
     detrend: bool = True,
     output_png: str = None,
     plot_rpot: bool = True,
+    leads_override: list[int] = None,       # preferred path
 ):
     comp = component.lower()
     if comp not in PREPROCESS_MAP:
@@ -67,58 +71,55 @@ def run_acc_snr_diagnostic(
     if plot_rpot is None:
         plot_rpot = (comp == "ocn")
 
-    season_str = get_season_name(target_months)
-    resolved_inits = resolve_target_season_leads(target_months)
-    init_info = next((item for item in resolved_inits if int(item[0]) == int(init_month)), None)
+    # Resolve leads
+    if leads_override is not None and len(leads_override) > 0:
+        leads = [int(L) for L in leads_override]
+        if any(L < 0 for L in leads):
+            raise ValueError(f"Invalid negative lead in {leads}")
+        target_months = leads_to_target_months(init_month, leads)
+        season_str = get_season_name(target_months)
+        label = f"Init {init_month:02d} | Leads {leads[0]}-{leads[-1]}" if len(leads) > 1 else f"Init {init_month:02d} | Lead {leads[0]}"
+    else:
+        season_str = get_season_name(target_months)
+        resolved_inits = resolve_target_season_leads(target_months)
+        init_info = next((item for item in resolved_inits if int(item[0]) == int(init_month)), None)
+        if init_info is None:
+            available_inits = [item[0] for item in resolved_inits]
+            raise ValueError(f"Init month {init_month:02d} cannot target season {season_str}. Available: {available_inits}")
+        _, leads, label = init_info
 
-    if init_info is None:
-        available_inits = [item[0] for item in resolved_inits]
-        raise ValueError(f"Init month {init_month:02d} cannot target season {season_str}. Available: {available_inits}")
-
-    _, leads, label = init_info
     domain_label = DOMAIN_LABEL_MAP[comp]
-    obs_label = OBS_NAME_MAP[comp]
-
     logger.info(f"=== Starting {season_str} {domain_label} ACC + SNR Diagnostic ({var_name}) ===")
 
-    # 1. Ingest SFS & Climatology
+    # 1) Ingest SFS and compute seasonal lead-mean
     ds_sfs_raw = get_sfs_data(init_month=init_month, domain=comp, requested_vars=[var_name])
     ds_sfs = PREPROCESS_MAP[comp](ds_sfs_raw, target_res="1.0deg")
-    sfs_clim = get_or_compute_sfs_climatology(ds_sfs, domain=comp, init_month=init_month)
-
-    # Atomic Cache Update
-    if var_name not in sfs_clim:
-        logger.info(f"Variable '{var_name}' missing from cache. Computing and updating disk cache...")
-        cache_file = getattr(sfs_clim, "encoding", {}).get("source")
-        sfs_clim_updated = sfs_clim.load().copy()
-        sfs_clim.close()
-
-        clim_dims = [d for d in ["year", "init", "time", "member", "number", "ens"] if d in ds_sfs[var_name].dims]
-        var_clim = ds_sfs[var_name].mean(dim=clim_dims, skipna=True) if clim_dims else ds_sfs[var_name]
-        sfs_clim_updated[var_name] = var_clim
-
-        if cache_file and os.path.exists(cache_file):
-            tmp_cache_file = cache_file + ".tmp"
-            sfs_clim_updated.to_netcdf(tmp_cache_file)
-            os.replace(tmp_cache_file, cache_file)
-        sfs_clim = sfs_clim_updated
 
     sfs_season_da = ds_sfs[var_name].sel(lead=leads).mean(dim="lead", skipna=True)
-    sfs_clim_da = sfs_clim[var_name].sel(lead=leads).mean(dim="lead", skipna=True)
 
-    # 2. Ingest Observations
+    # 1b) Recompute SFS climatology from *current ds_sfs only* (avoid cache inconsistency)
+    clim_dims = [d for d in ["year", "init", "time", "member", "number", "ens"] if d in ds_sfs[var_name].dims]
+    sfs_clim_full = ds_sfs[var_name].mean(dim=clim_dims, skipna=True) if clim_dims else ds_sfs[var_name]
+
+    if "lead" not in sfs_clim_full.dims:
+        raise ValueError(f"SFS climatology for {var_name} has no 'lead' dimension; dims={sfs_clim_full.dims}")
+
+    sfs_clim_da = sfs_clim_full.sel(lead=leads).mean(dim="lead", skipna=True)
+
+    # 2) Ingest observations aligned by init-year + leads
     ds_obs_raw = OBS_DATA_MAP[comp](requested_vars=[var_name])
-    ds_obs_base = ds_obs_raw.sel(time=slice(str(start_year), str(end_year)))
-    obs_season_da = seasonal_mean_by_target_months(
-    ds_obs_base[var_name],
-    target_months=target_months,
-    time_dim="time",
-    require_complete=True,
-)
-
+    obs_season_da = seasonal_mean_obs_by_init_and_leads(
+        ds_obs_raw[var_name],
+        init_month=init_month,
+        leads=leads,
+        start_year=start_year,
+        end_year=end_year,
+        time_dim="time",
+        require_complete=True,
+    )
     obs_clim_da = obs_season_da.mean(dim="year", skipna=True)
 
-    # 3. Standardize dimensions & coerce years
+    # 3) Standardize year dimensions
     if "init" in sfs_season_da.dims and "year" not in sfs_season_da.dims:
         sfs_season_da = sfs_season_da.rename({"init": "year"})
     if "init" in sfs_clim_da.dims and "year" not in sfs_clim_da.dims:
@@ -131,6 +132,14 @@ def run_acc_snr_diagnostic(
 
     common_years = np.intersect1d(sfs_season_da.year.values, obs_season_da.year.values)
     eval_years = [y for y in common_years if start_year <= y <= end_year]
+
+    logger.info(
+        f"SFS years: {int(np.min(sfs_season_da.year.values))}-{int(np.max(sfs_season_da.year.values))} "
+        f"(n={sfs_season_da.year.size}) | "
+        f"OBS years: {int(np.min(obs_season_da.year.values))}-{int(np.max(obs_season_da.year.values))} "
+        f"(n={obs_season_da.year.size})"
+    )
+    logger.info(f"Common overlapping years in requested window: n={len(eval_years)}")
 
     if len(eval_years) == 0:
         raise ValueError(f"No overlapping years found in range {start_year}-{end_year}.")
@@ -148,15 +157,15 @@ def run_acc_snr_diagnostic(
             f"init{init_month:02d}_{actual_start}-{actual_end}{detrend_str}.png"
         )
 
-    # 4. Eager load into RAM
+    # 4) Eager load
     sfs_season_da = sfs_season_da.load()
     obs_season_da = obs_season_da.load()
     sfs_clim_da = sfs_clim_da.load()
     obs_clim_da = obs_clim_da.load()
 
-    # 5. Compute Metrics
+    # 5) Metrics
     logger.info("Calculating Signal-to-Noise Ratio (SNR)...")
-    snr_da = compute_snr(sfs_season_da, detrend=detrend)
+    snr_da = compute_snr(sfs_season_da, detrend=detrend).load()
 
     logger.info(f"Calculating Anomaly Correlation Coefficient (ACC) [detrend={detrend}]...")
     acc_da = compute_acc(
@@ -165,12 +174,9 @@ def run_acc_snr_diagnostic(
         sfs_clim=sfs_clim_da,
         obs_clim=obs_clim_da,
         detrend=detrend,
-    )
+    ).load()
 
-    acc_da = acc_da.load()
-    snr_da = snr_da.load()
-
-    # 6. Render Panel A Overlay Plot
+    # 6) Overlay plot
     logger.info("Rendering Panel A Overlay Plot...")
     title_overlay = f"SFS {var_name} {season_str} Skill & Predictability ({actual_start}-{actual_end}) | {label}"
     plot_acc_snr_overlay(
@@ -180,7 +186,7 @@ def run_acc_snr_diagnostic(
         output_png=output_png,
     )
 
-    # 7. Render 3-Panel Skill, Predictability & Calibration Stack
+    # 7) Trio plot
     if plot_rpot:
         logger.info("Calculating Potential Skill (r_pot) & RPC...")
         rpot_da = compute_potential_skill(snr_da).load()
@@ -188,10 +194,9 @@ def run_acc_snr_diagnostic(
 
         logger.info("Rendering 3-Panel Diagnostic Stack (ACC, r_pot, RPC)...")
         output_trio_png = output_png.replace("_acc_snr_", "_skill_trio_")
-        
-        main_header = "Model Skill vs. Internal Coherence: Evaluating Model Confidence"
+        main_header = ""
         subtitle_str = f"SFS {var_name} {season_str} ({actual_start}–{actual_end}) | {label}"
-        
+
         plot_skill_predictability_trio(
             acc_da=acc_da,
             rpot_da=rpot_da,
@@ -207,7 +212,8 @@ if __name__ == "__main__":
     parser.add_argument("--component", "-c", type=str, default="atm", choices=["atm", "ice", "ocn"])
     parser.add_argument("--var", "-v", type=str, default=None)
     parser.add_argument("--init", "-i", type=int, default=5)
-    parser.add_argument("--target", "-t", type=int, nargs="+", default=[1, 2, 3])
+    parser.add_argument("--leads", "-L", type=int, nargs="+", default=None)  # preferred
+    parser.add_argument("--target", "-t", type=int, nargs="+", default=[1, 2, 3])  # legacy
     parser.add_argument("--start-year", type=int, default=1991)
     parser.add_argument("--end-year", type=int, default=2022)
     parser.add_argument("--no-detrend", action="store_true")
@@ -223,6 +229,6 @@ if __name__ == "__main__":
         start_year=args.start_year,
         end_year=args.end_year,
         detrend=not args.no_detrend,
-       # plot_rpot=True if args.plot_rpot else None,
-        plot_rpot=True ,
+        plot_rpot=True if args.plot_rpot else None,
+        leads_override=args.leads,
     )

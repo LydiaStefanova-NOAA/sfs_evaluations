@@ -22,8 +22,12 @@ from preprocess.pipeline import (
     preprocess_ice_dataset,
     preprocess_ocn_dataset,
 )
-
-from preprocess.temporal import resolve_target_season_leads, get_season_name, seasonal_mean_by_target_months
+from preprocess.temporal import (
+    resolve_target_season_leads,
+    get_season_name,
+    leads_to_target_months,
+    seasonal_mean_obs_by_init_and_leads,
+)
 from metrics.snr import _linear_detrend
 from viz.spatial import _prepare_cyclic_grid, LAND_GRAY
 
@@ -31,13 +35,12 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Registries (Aligned with test_unified_snr_acc.py) ---
+# --- Registries ---
 DOMAIN_VARS = {
     "atm": ["TMP2m", "Z500", "HGT500", "Z200", "Z700", "Z850", "MSLP", "PRATE", "U10m", "V10m", "T850", "T200", "U850", "V850", "U200", "V200"],
     "ocn": ["SST", "SSH", "SSS", "MLD_003", "MLD_0125", "dt20c", "ocnheat", "taux", "tauy"],
     "ice": ["aice_h", "hi_h", "hs_h", "Tsfc_h", "uvel_h", "vvel_h"],
 }
-
 PREPROCESS_MAP = {"atm": preprocess_atm_dataset, "ice": preprocess_ice_dataset, "ocn": preprocess_ocn_dataset}
 OBS_DATA_MAP = {"atm": get_era5_data, "ice": get_oras5_data, "ocn": get_oras5_data}
 OBS_NAME_MAP = {"atm": "ERA5", "ice": "ORAS5", "ocn": "ORAS5"}
@@ -59,7 +62,6 @@ def compute_variance_ratios(
     sfs_da = sfs_da.sel({year_dim: common_years})
     obs_da = obs_da.sel({year_dim: common_years})
 
-    # Detrending (matching core metric pipeline)
     if detrend:
         ens_mean_raw = sfs_da.mean(dim=member_dim, skipna=True)
         poly_coeffs = ens_mean_raw.polyfit(dim=year_dim, deg=1)
@@ -73,7 +75,6 @@ def compute_variance_ratios(
 
     ens_mean = sfs_proc.mean(dim=member_dim, skipna=True)
 
-    # 1. Variances
     var_signal_mod = ens_mean.var(dim=year_dim, ddof=1, skipna=True)
     var_obs = obs_proc.var(dim=year_dim, ddof=1, skipna=True)
 
@@ -82,14 +83,13 @@ def compute_variance_ratios(
 
     mse = ((ens_mean - obs_proc) ** 2).mean(dim=year_dim, skipna=True)
 
-    # 2. Ratios
     svr_da = var_signal_mod / var_obs.where(var_obs > 0)
     svr_da.name = "svr"
-    svr_da.attrs["long_name"] = "Signal Variance Ratio (Var_signal / Var_obs)"
+    svr_da.attrs["long_name"] = "Ratio of model signal vs obs variance (Var_signal / Var_obs)"
 
     nvr_da = var_noise_mod / mse.where(mse > 0)
     nvr_da.name = "nvr"
-    nvr_da.attrs["long_name"] = "Noise-to-MSE Variance Ratio (Var_noise / MSE)"
+    nvr_da.attrs["long_name"] = "Ratio of model noise vs MSE (Var_noise / MSE)"
 
     return svr_da, nvr_da
 
@@ -119,7 +119,7 @@ def plot_variance_diagnostics_map(
         ax.add_feature(cfeature.BORDERS, linewidth=0.3, edgecolor="gray", linestyle=":", zorder=5)
         ax.gridlines(draw_labels=False, linestyle=":", color="gray", alpha=0.3, zorder=6)
 
-    # --- Panel (a): Signal Variance Ratio (SVR) ---
+    # Panel (a)
     lon2d, lat2d, cyclic_svr, svr_vals = _prepare_cyclic_grid(svr_da)
 
     svr_bounds = [0.0, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0]
@@ -148,7 +148,7 @@ def plot_variance_diagnostics_map(
     )
     cbar1.ax.tick_params(labelsize=8)
 
-    # --- Panel (b): Noise-to-MSE Variance Ratio (NVR) ---
+    # Panel (b)
     _, _, cyclic_nvr, nvr_vals = _prepare_cyclic_grid(nvr_da)
 
     nvr_bounds = [0.0, 0.1, 0.25, 0.5, 0.8, 1.2, 2.0, 5.0]
@@ -194,6 +194,7 @@ def run_variance_diagnostic_cli(
     end_year: int = 2022,
     detrend: bool = True,
     output_png: str = None,
+    leads_override: list[int] = None,
 ):
     comp = component.lower()
     if comp not in PREPROCESS_MAP:
@@ -205,37 +206,43 @@ def run_variance_diagnostic_cli(
     if var_name not in DOMAIN_VARS[comp]:
         raise ValueError(f"Variable '{var_name}' not supported for domain '{comp}'. Allowed: {DOMAIN_VARS[comp]}")
 
-    season_str = get_season_name(target_months)
-    resolved_inits = resolve_target_season_leads(target_months)
-    init_info = next((item for item in resolved_inits if int(item[0]) == int(init_month)), None)
+    # Resolve leads
+    if leads_override is not None and len(leads_override) > 0:
+        leads = [int(L) for L in leads_override]
+        target_months = leads_to_target_months(init_month, leads)
+        season_str = get_season_name(target_months)
+        label = f"Init {init_month:02d} | Leads {leads[0]}-{leads[-1]}" if len(leads) > 1 else f"Init {init_month:02d} | Lead {leads[0]}"
+    else:
+        season_str = get_season_name(target_months)
+        resolved_inits = resolve_target_season_leads(target_months)
+        init_info = next((item for item in resolved_inits if int(item[0]) == int(init_month)), None)
+        if init_info is None:
+            available_inits = [item[0] for item in resolved_inits]
+            raise ValueError(f"Init month {init_month:02d} cannot target season {season_str}. Available: {available_inits}")
+        _, leads, label = init_info
 
-    if init_info is None:
-        available_inits = [item[0] for item in resolved_inits]
-        raise ValueError(f"Init month {init_month:02d} cannot target season {season_str}. Available: {available_inits}")
-
-    _, leads, label = init_info
     domain_label = DOMAIN_LABEL_MAP[comp]
     obs_label = OBS_NAME_MAP[comp]
-
     logger.info(f"=== Starting {season_str} {domain_label} SNR Variance Breakdown Diagnostic ({var_name}) ===")
 
-    # 1. Ingest SFS Data
+    # 1) SFS
     ds_sfs_raw = get_sfs_data(init_month=init_month, domain=comp, requested_vars=[var_name])
     ds_sfs = PREPROCESS_MAP[comp](ds_sfs_raw)
-
-    # 2. Ingest Verification Observations (ERA5 or ORAS5)
-    ds_obs_raw = OBS_DATA_MAP[comp](requested_vars=[var_name])
-
     sfs_season_da = ds_sfs[var_name].sel(lead=leads).mean(dim="lead", skipna=True)
-    obs_base = ds_obs_raw.sel(time=slice(str(start_year), str(end_year)))
 
-    obs_season_da = seasonal_mean_by_target_months(
-        obs_base[var_name],
-        target_months=target_months,
+    # 2) OBS aligned by init-year + leads
+    ds_obs_raw = OBS_DATA_MAP[comp](requested_vars=[var_name])
+    obs_season_da = seasonal_mean_obs_by_init_and_leads(
+        ds_obs_raw[var_name],
+        init_month=init_month,
+        leads=leads,
+        start_year=start_year,
+        end_year=end_year,
         time_dim="time",
         require_complete=True,
     )
-    # 3. Standardize dimensions & coerce years
+
+    # 3) Standardize year dim
     if "init" in sfs_season_da.dims and "year" not in sfs_season_da.dims:
         sfs_season_da = sfs_season_da.rename({"init": "year"})
 
@@ -246,21 +253,18 @@ def run_variance_diagnostic_cli(
 
     common_years = np.intersect1d(sfs_season_da.year.values, obs_season_da.year.values)
     eval_years = [y for y in common_years if start_year <= y <= end_year]
-
     if len(eval_years) == 0:
         raise ValueError(f"No overlapping years found in range {start_year}-{end_year}.")
 
-    # --------------------------------------------------------------------------
-    # 💥 ADD .squeeze(drop=True) HERE TO DROP SINGLETON DEPTH/LEVEL DIMENSIONS
-    # --------------------------------------------------------------------------
     sfs_season_da = sfs_season_da.sel(year=eval_years).squeeze(drop=True).load()
     obs_season_da = obs_season_da.sel(year=eval_years).squeeze(drop=True).load()
 
-    #sfs_season_da = sfs_season_da.sel(year=eval_years).load()
-    #obs_season_da = obs_season_da.sel(year=eval_years).load()
-
     actual_start, actual_end = eval_years[0], eval_years[-1]
     logger.info(f"Evaluation window: {len(eval_years)} actual years ({actual_start}-{actual_end}).")
+    logger.info(
+        f"SFS years={sfs_season_da.year.values.min()}..{sfs_season_da.year.values.max()} | "
+        f"OBS years={obs_season_da.year.values.min()}..{obs_season_da.year.values.max()}"
+    )
 
     if output_png is None:
         detrend_str = "_detrended" if detrend else ""
@@ -269,16 +273,15 @@ def run_variance_diagnostic_cli(
             f"init{init_month:02d}_{actual_start}-{actual_end}{detrend_str}.png"
         )
 
-    # 4. Compute Metrics
+    # 4) Metrics
     logger.info(f"Computing Variance Ratios (SVR & NVR) against {obs_label}...")
     svr_da, nvr_da = compute_variance_ratios(sfs_season_da, obs_season_da, detrend=detrend)
 
-    # 5. Render Plot
+    # 5) Plot
     title_str = (
-        f"SFS {var_name} {season_str} Signal vs. Noise Variance Diagnostic "
+        f"SFS {var_name} {season_str} Signal vs. Noise Variance "
         f"({actual_start}–{actual_end}) | {label}"
     )
-
     plot_variance_diagnostics_map(
         svr_da=svr_da,
         nvr_da=nvr_da,
@@ -292,7 +295,8 @@ if __name__ == "__main__":
     parser.add_argument("--component", "-c", type=str, default="ocn", choices=["atm", "ice", "ocn"])
     parser.add_argument("--var", "-v", type=str, default=None)
     parser.add_argument("--init", "-i", type=int, default=5)
-    parser.add_argument("--target", "-t", type=int, nargs="+", default=[1, 2, 3])
+    parser.add_argument("--leads", "-L", type=int, nargs="+", default=None)
+    parser.add_argument("--target", "-t", type=int, nargs="+", default=[1, 2, 3])  # legacy path
     parser.add_argument("--start-year", type=int, default=1991)
     parser.add_argument("--end-year", type=int, default=2022)
     parser.add_argument("--no-detrend", action="store_true")
@@ -307,4 +311,5 @@ if __name__ == "__main__":
         start_year=args.start_year,
         end_year=args.end_year,
         detrend=not args.no_detrend,
+        leads_override=args.leads,
     )
