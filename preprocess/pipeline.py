@@ -65,7 +65,7 @@ def preprocess_ice_dataset(
                 ds_out[var] = ds_out[var].where(ice_mask)
 
     logger.info("--- Sea Ice Preprocessing Pipeline Complete ---")
-    return ds_outo
+    return ds_out
 def preprocess_ocn_dataset(
     ds: xr.Dataset,
     target_res: str = "1.0deg",
