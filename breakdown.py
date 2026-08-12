@@ -1,6 +1,13 @@
 """
 Spatial Diagnostic Script: Unpack High SNR into Signal Variance vs. Noise Variance Ratios
 Supports Atmospheric (atm), Oceanic (ocn), and Sea Ice (ice) variables.
+
+Minimal-variant updates (no forced target_res):
+- Keep preprocess defaults per domain
+- Canonicalize lon/lat and sort coordinates
+- Explicitly align OBS to SFS grid before metric computation
+- Stabilize SVR/NVR denominators via epsilon masks
+- Optional debug logging for grid and NaN diagnostics
 """
 import argparse
 import logging
@@ -48,12 +55,59 @@ DOMAIN_LABEL_MAP = {"atm": "Atmospheric", "ice": "SeaIce", "ocn": "Oceanic"}
 DEFAULT_VARS = {"atm": "TMP2m", "ice": "aice_h", "ocn": "SSH"}
 
 
+def _canonicalize_lonlat(da: xr.DataArray) -> xr.DataArray:
+    """Convert lon to [0,360) and sort lon/lat when 1D."""
+    out = da
+    if "lon" in out.coords and out["lon"].ndim == 1:
+        out = out.assign_coords(lon=(out["lon"] % 360)).sortby("lon")
+    if "lat" in out.coords and out["lat"].ndim == 1:
+        out = out.sortby("lat")
+    return out
+
+
+def _align_obs_to_sfs_grid(obs_da: xr.DataArray, sfs_da: xr.DataArray) -> xr.DataArray:
+    """Interpolate OBS onto SFS lat/lon grid for strict collocation."""
+    if not all(c in sfs_da.coords for c in ["lat", "lon"]):
+        raise ValueError("SFS DataArray missing lat/lon coordinates.")
+    if not all(c in obs_da.coords for c in ["lat", "lon"]):
+        raise ValueError("OBS DataArray missing lat/lon coordinates.")
+
+    obs_can = _canonicalize_lonlat(obs_da)
+    sfs_can = _canonicalize_lonlat(sfs_da)
+
+    return obs_can.interp(lat=sfs_can["lat"], lon=sfs_can["lon"], method="linear")
+
+
+def _grid_report(tag: str, da: xr.DataArray) -> None:
+    logger.info(f"[{tag}] dims={da.dims}, sizes={dict(da.sizes)}")
+    if "lon" in da.coords and da["lon"].ndim == 1 and da.sizes.get("lon", 0) > 1:
+        dlon = da["lon"].diff("lon").values
+        logger.info(
+            f"[{tag}] lon min={float(da.lon.min()):.3f}, max={float(da.lon.max()):.3f}, "
+            f"median_step={float(np.nanmedian(np.abs(dlon))):.3f}, monotonic_inc={bool(np.all(dlon > 0))}"
+        )
+    if "lat" in da.coords and da["lat"].ndim == 1 and da.sizes.get("lat", 0) > 1:
+        dlat = da["lat"].diff("lat").values
+        logger.info(
+            f"[{tag}] lat min={float(da.lat.min()):.3f}, max={float(da.lat.max()):.3f}, "
+            f"median_step={float(np.nanmedian(np.abs(dlat))):.3f}, monotonic_inc={bool(np.all(dlat > 0))}"
+        )
+
+
+def _nan_report(tag: str, da: xr.DataArray) -> None:
+    arr = da.values
+    logger.info(f"[{tag}] nan_frac={float(np.isnan(arr).mean()):.4f}")
+
+
 def compute_variance_ratios(
     sfs_da: xr.DataArray,
     obs_da: xr.DataArray,
     year_dim: str = "year",
     member_dim: str = "member",
     detrend: bool = True,
+    varobs_eps: float = 1e-12,
+    mse_eps: float = 1e-12,
+    debug: bool = False,
 ) -> tuple[xr.DataArray, xr.DataArray]:
     """
     Computes Signal Variance Ratio (SVR) and Noise-to-MSE Variance Ratio (NVR).
@@ -83,13 +137,20 @@ def compute_variance_ratios(
 
     mse = ((ens_mean - obs_proc) ** 2).mean(dim=year_dim, skipna=True)
 
-    svr_da = var_signal_mod / var_obs.where(var_obs > 0)
+    # Epsilon-stabilized denominators
+    svr_da = var_signal_mod / var_obs.where(var_obs > varobs_eps)
     svr_da.name = "svr"
     svr_da.attrs["long_name"] = "Ratio of model signal vs obs variance (Var_signal / Var_obs)"
 
-    nvr_da = var_noise_mod / mse.where(mse > 0)
+    nvr_da = var_noise_mod / mse.where(mse > mse_eps)
     nvr_da.name = "nvr"
     nvr_da.attrs["long_name"] = "Ratio of model noise vs MSE (Var_noise / MSE)"
+
+    if debug:
+        _nan_report("var_obs", var_obs)
+        _nan_report("mse", mse)
+        _nan_report("svr", svr_da)
+        _nan_report("nvr", nvr_da)
 
     return svr_da, nvr_da
 
@@ -195,6 +256,9 @@ def run_variance_diagnostic_cli(
     detrend: bool = True,
     output_png: str = None,
     leads_override: list[int] = None,
+    varobs_eps: float = 1e-12,
+    mse_eps: float = 1e-12,
+    debug: bool = False,
 ):
     comp = component.lower()
     if comp not in PREPROCESS_MAP:
@@ -225,7 +289,7 @@ def run_variance_diagnostic_cli(
     obs_label = OBS_NAME_MAP[comp]
     logger.info(f"=== Starting {season_str} {domain_label} SNR Variance Breakdown Diagnostic ({var_name}) ===")
 
-    # 1) SFS
+    # 1) SFS (keep preprocess defaults; do not force target_res)
     ds_sfs_raw = get_sfs_data(init_month=init_month, domain=comp, requested_vars=[var_name])
     ds_sfs = PREPROCESS_MAP[comp](ds_sfs_raw)
     sfs_season_da = ds_sfs[var_name].sel(lead=leads).mean(dim="lead", skipna=True)
@@ -251,13 +315,24 @@ def run_variance_diagnostic_cli(
     if np.issubdtype(obs_season_da.year.dtype, np.datetime64):
         obs_season_da["year"] = obs_season_da.year.dt.year
 
+    # Canonicalize coordinates before temporal intersection and alignment
+    sfs_season_da = _canonicalize_lonlat(sfs_season_da)
+    obs_season_da = _canonicalize_lonlat(obs_season_da)
+
     common_years = np.intersect1d(sfs_season_da.year.values, obs_season_da.year.values)
     eval_years = [y for y in common_years if start_year <= y <= end_year]
     if len(eval_years) == 0:
         raise ValueError(f"No overlapping years found in range {start_year}-{end_year}.")
 
-    sfs_season_da = sfs_season_da.sel(year=eval_years).squeeze(drop=True).load()
-    obs_season_da = obs_season_da.sel(year=eval_years).squeeze(drop=True).load()
+    sfs_season_da = sfs_season_da.sel(year=eval_years).squeeze(drop=True)
+    obs_season_da = obs_season_da.sel(year=eval_years).squeeze(drop=True)
+
+    # Explicit collocation: obs -> sfs grid
+    obs_season_da = _align_obs_to_sfs_grid(obs_season_da, sfs_season_da)
+
+    # Eager load
+    sfs_season_da = sfs_season_da.load()
+    obs_season_da = obs_season_da.load()
 
     actual_start, actual_end = eval_years[0], eval_years[-1]
     logger.info(f"Evaluation window: {len(eval_years)} actual years ({actual_start}-{actual_end}).")
@@ -265,6 +340,12 @@ def run_variance_diagnostic_cli(
         f"SFS years={sfs_season_da.year.values.min()}..{sfs_season_da.year.values.max()} | "
         f"OBS years={obs_season_da.year.values.min()}..{obs_season_da.year.values.max()}"
     )
+
+    if debug:
+        _grid_report("SFS seasonal", sfs_season_da)
+        _grid_report("OBS seasonal (aligned)", obs_season_da)
+        _nan_report("SFS seasonal", sfs_season_da)
+        _nan_report("OBS seasonal (aligned)", obs_season_da)
 
     if output_png is None:
         detrend_str = "_detrended" if detrend else ""
@@ -275,11 +356,22 @@ def run_variance_diagnostic_cli(
 
     # 4) Metrics
     logger.info(f"Computing Variance Ratios (SVR & NVR) against {obs_label}...")
-    svr_da, nvr_da = compute_variance_ratios(sfs_season_da, obs_season_da, detrend=detrend)
+    svr_da, nvr_da = compute_variance_ratios(
+        sfs_season_da,
+        obs_season_da,
+        detrend=detrend,
+        varobs_eps=varobs_eps,
+        mse_eps=mse_eps,
+        debug=debug,
+    )
+
+    # Keep coordinate order stable for plotting
+    svr_da = _canonicalize_lonlat(svr_da)
+    nvr_da = _canonicalize_lonlat(nvr_da)
 
     # 5) Plot
     title_str = (
-        f"SFS {var_name} {season_str} Signal vs. Noise Variance "
+        f"{component}: SFS {var_name} {season_str} Signal vs. Noise Variance "
         f"({actual_start}–{actual_end}) | {label}"
     )
     plot_variance_diagnostics_map(
@@ -301,6 +393,11 @@ if __name__ == "__main__":
     parser.add_argument("--end-year", type=int, default=2022)
     parser.add_argument("--no-detrend", action="store_true")
 
+    # minimal new flags
+    parser.add_argument("--varobs-eps", type=float, default=1e-12)
+    parser.add_argument("--mse-eps", type=float, default=1e-12)
+    parser.add_argument("--debug", action="store_true")
+
     args = parser.parse_args()
 
     run_variance_diagnostic_cli(
@@ -312,4 +409,7 @@ if __name__ == "__main__":
         end_year=args.end_year,
         detrend=not args.no_detrend,
         leads_override=args.leads,
+        varobs_eps=args.varobs_eps,
+        mse_eps=args.mse_eps,
+        debug=args.debug,
     )

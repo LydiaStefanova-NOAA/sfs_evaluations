@@ -69,7 +69,8 @@ def run_acc_snr_diagnostic(
         raise ValueError(f"Variable '{var_name}' not supported for domain '{comp}'. Allowed: {DOMAIN_VARS[comp]}")
 
     if plot_rpot is None:
-        plot_rpot = (comp == "ocn")
+        #plot_rpot = (comp == "ocn")
+        plot_rpot = True
 
     # Resolve leads
     if leads_override is not None and len(leads_override) > 0:
@@ -178,7 +179,7 @@ def run_acc_snr_diagnostic(
 
     # 6) Overlay plot
     logger.info("Rendering Panel A Overlay Plot...")
-    title_overlay = f"SFS {var_name} {season_str} Skill & Predictability ({actual_start}-{actual_end}) | {label}"
+    title_overlay = f"{component}: SFS {var_name} {season_str} Skill & Predictability ({actual_start}-{actual_end}) | {label}"
     plot_acc_snr_overlay(
         acc_da=acc_da,
         snr_da=snr_da,
@@ -195,7 +196,7 @@ def run_acc_snr_diagnostic(
         logger.info("Rendering 3-Panel Diagnostic Stack (ACC, r_pot, RPC)...")
         output_trio_png = output_png.replace("_acc_snr_", "_skill_trio_")
         main_header = ""
-        subtitle_str = f"SFS {var_name} {season_str} ({actual_start}–{actual_end}) | {label}"
+        subtitle_str = f"{component}: SFS {var_name} {season_str} ({actual_start}–{actual_end}) | {label}"
 
         plot_skill_predictability_trio(
             acc_da=acc_da,
