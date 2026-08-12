@@ -234,7 +234,7 @@ def plot_skill_predictability_trio(
 
         # --- Column 1 (Middle: Well-Calibrated / Masked) ---
         mpatches.Patch(facecolor="#c7e9c0", edgecolor="black", label="0.8 - 1.2: Well-Calibrated"),          # Row 0, Col 1
-        mpatches.Patch(facecolor=LAND_GRAY, edgecolor="black", label="Masked/No Signal (ACC<0.3)"),                 # Row 1, Col 1
+        mpatches.Patch(facecolor=LAND_GRAY, edgecolor="black", label="Masked/No Signal"),                 # Row 1, Col 1
 
         # --- Column 2 (Right Side: Underconfident) ---
         mpatches.Patch(facecolor="#e6550d", edgecolor="black", label="> 1.6: Highly Underconfident (Strong S/N Paradox"),  # Row 0, Col 2 (Dark Red)
