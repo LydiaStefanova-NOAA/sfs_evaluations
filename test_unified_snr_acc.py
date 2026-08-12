@@ -23,6 +23,14 @@ from preprocess.temporal import (
     leads_to_target_months,
     seasonal_mean_obs_by_init_and_leads,
 )
+from preprocess.spatial_alignment import (
+    canonicalize_lonlat,
+    standardize_year_dim,
+    align_obs_to_sfs_grid,
+    select_common_eval_years,
+    grid_report,
+    nan_report,
+)
 
 # Metrics & Viz
 from metrics.acc import compute_acc
@@ -57,6 +65,7 @@ def run_acc_snr_diagnostic(
     output_png: str = None,
     plot_rpot: bool = True,
     leads_override: list[int] = None,       # preferred path
+    debug: bool = False,
 ):
     comp = component.lower()
     if comp not in PREPROCESS_MAP:
@@ -93,11 +102,11 @@ def run_acc_snr_diagnostic(
 
     # 1) Ingest SFS and compute seasonal lead-mean
     ds_sfs_raw = get_sfs_data(init_month=init_month, domain=comp, requested_vars=[var_name])
-    ds_sfs = PREPROCESS_MAP[comp](ds_sfs_raw, target_res="1.0deg")
+    ds_sfs = PREPROCESS_MAP[comp](ds_sfs_raw)  # use preprocess defaults (same style as breakdown)
 
     sfs_season_da = ds_sfs[var_name].sel(lead=leads).mean(dim="lead", skipna=True)
 
-    # 1b) Recompute SFS climatology from *current ds_sfs only* (avoid cache inconsistency)
+    # 1b) Recompute SFS climatology from current ds_sfs only (avoid cache inconsistency)
     clim_dims = [d for d in ["year", "init", "time", "member", "number", "ens"] if d in ds_sfs[var_name].dims]
     sfs_clim_full = ds_sfs[var_name].mean(dim=clim_dims, skipna=True) if clim_dims else ds_sfs[var_name]
 
@@ -119,36 +128,39 @@ def run_acc_snr_diagnostic(
     )
     obs_clim_da = obs_season_da.mean(dim="year", skipna=True)
 
-    # 3) Standardize year dimensions
-    if "init" in sfs_season_da.dims and "year" not in sfs_season_da.dims:
-        sfs_season_da = sfs_season_da.rename({"init": "year"})
-    if "init" in sfs_clim_da.dims and "year" not in sfs_clim_da.dims:
-        sfs_clim_da = sfs_clim_da.rename({"init": "year"})
+    # 3) Standardize + canonicalize + common years
+    sfs_season_da = standardize_year_dim(sfs_season_da)
+    obs_season_da = standardize_year_dim(obs_season_da)
 
-    if np.issubdtype(sfs_season_da.year.dtype, np.datetime64):
-        sfs_season_da["year"] = sfs_season_da.year.dt.year
-    if np.issubdtype(obs_season_da.year.dtype, np.datetime64):
-        obs_season_da["year"] = obs_season_da.year.dt.year
+    sfs_season_da = canonicalize_lonlat(sfs_season_da)
+    obs_season_da = canonicalize_lonlat(obs_season_da)
+    sfs_clim_da = canonicalize_lonlat(sfs_clim_da)
+    obs_clim_da = canonicalize_lonlat(obs_clim_da)
 
-    common_years = np.intersect1d(sfs_season_da.year.values, obs_season_da.year.values)
-    eval_years = [y for y in common_years if start_year <= y <= end_year]
+    sfs_season_da, obs_season_da, eval_years = select_common_eval_years(
+        sfs_season_da, obs_season_da, start_year=start_year, end_year=end_year
+    )
 
+    # Explicit collocation for seasonal fields and climatologies
+    obs_season_da = align_obs_to_sfs_grid(obs_season_da, sfs_season_da, method="linear")
+    obs_clim_da = align_obs_to_sfs_grid(obs_clim_da, sfs_clim_da, method="linear")
+
+    if debug:
+        grid_report("SFS seasonal", sfs_season_da)
+        grid_report("OBS seasonal aligned", obs_season_da)
+        grid_report("SFS clim", sfs_clim_da)
+        grid_report("OBS clim aligned", obs_clim_da)
+        nan_report("SFS seasonal", sfs_season_da)
+        nan_report("OBS seasonal aligned", obs_season_da)
+
+    actual_start, actual_end = eval_years[0], eval_years[-1]
+    logger.info(f"Evaluation window: {len(eval_years)} actual years ({actual_start}-{actual_end}).")
     logger.info(
         f"SFS years: {int(np.min(sfs_season_da.year.values))}-{int(np.max(sfs_season_da.year.values))} "
         f"(n={sfs_season_da.year.size}) | "
         f"OBS years: {int(np.min(obs_season_da.year.values))}-{int(np.max(obs_season_da.year.values))} "
         f"(n={obs_season_da.year.size})"
     )
-    logger.info(f"Common overlapping years in requested window: n={len(eval_years)}")
-
-    if len(eval_years) == 0:
-        raise ValueError(f"No overlapping years found in range {start_year}-{end_year}.")
-
-    sfs_season_da = sfs_season_da.sel(year=eval_years)
-    obs_season_da = obs_season_da.sel(year=eval_years)
-
-    actual_start, actual_end = eval_years[0], eval_years[-1]
-    logger.info(f"Evaluation window: {len(eval_years)} actual years ({actual_start}-{actual_end}).")
 
     if output_png is None:
         detrend_str = "_detrended" if detrend else ""
@@ -218,6 +230,7 @@ if __name__ == "__main__":
     parser.add_argument("--end-year", type=int, default=2022)
     parser.add_argument("--no-detrend", action="store_true")
     parser.add_argument("--plot-rpot", action="store_true")
+    parser.add_argument("--debug", action="store_true")
 
     args = parser.parse_args()
 
@@ -231,4 +244,5 @@ if __name__ == "__main__":
         detrend=not args.no_detrend,
         plot_rpot=True if args.plot_rpot else None,
         leads_override=args.leads,
+        debug=args.debug,
     )
