@@ -17,11 +17,24 @@ logger = logging.getLogger(__name__)
 LAND_GRAY = "#eaeaea"
 
 
-def create_acc_sfs_colormap():
+def create_acc_sfs_colormap_orig():
     """Exact 9-level ACC colormap used in NOAA SFSv1 verification diagnostics."""
     bounds = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
     hex_colors = [
         '#ffffcc', '#ffeda0', '#c7e9c0', '#a1d99b', '#74c476',
+        '#31a354', '#dadaeb', '#bcbddc', '#756bb1'
+    ]
+    cmap = mcolors.ListedColormap(hex_colors)
+    cmap.set_under("white")  # Values < 0.1 rendered white/unfilled
+    cmap.set_bad(color=(0, 0, 0, 0))  # Fully transparent NaNs for Cartopy cyclic wrapping
+    norm = mcolors.BoundaryNorm(bounds, cmap.N)
+    return cmap, norm, bounds
+
+def create_acc_sfs_colormap():
+    """Exact 9-level ACC colormap used in NOAA SFSv1 verification diagnostics."""
+    bounds = [ 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+    hex_colors = [
+        '#ffffcc', '#ffeda0',  '#a1d99b', 
         '#31a354', '#dadaeb', '#bcbddc', '#756bb1'
     ]
     cmap = mcolors.ListedColormap(hex_colors)
@@ -49,11 +62,50 @@ def create_rpc_colormap():
 
 
 def _prepare_cyclic_grid(da: xr.DataArray):
-    """Squeezes dimensions and applies cyclic longitude wrapping for Cartopy."""
+    """Squeeze + normalize coord names + add cyclic lon for Cartopy."""
+    import numpy as np
+    import xarray as xr
+
     da = da.squeeze()
+
+    # Normalize common coordinate aliases
+    rename_map = {}
+    if "lat" not in da.coords:
+        for c in ["latitude", "Latitude", "nav_lat", "y"]:
+            if c in da.coords:
+                rename_map[c] = "lat"
+                break
+    if "lon" not in da.coords:
+        for c in ["longitude", "Longitude", "nav_lon", "x"]:
+            if c in da.coords:
+                rename_map[c] = "lon"
+                break
+    if rename_map:
+        da = da.rename(rename_map)
+
+    # Also handle cases where dim names (not coords) are aliases
+    dim_rename = {}
+    if "lat" not in da.dims:
+        for d in ["latitude", "Latitude", "y"]:
+            if d in da.dims:
+                dim_rename[d] = "lat"
+                break
+    if "lon" not in da.dims:
+        for d in ["longitude", "Longitude", "x"]:
+            if d in da.dims:
+                dim_rename[d] = "lon"
+                break
+    if dim_rename:
+        da = da.rename(dim_rename)
+
+    if "lat" not in da.dims or "lon" not in da.dims:
+        raise ValueError(f"_prepare_cyclic_grid needs lat/lon dims; got dims={da.dims}, coords={list(da.coords)}")
+
+    da = da.transpose("lat", "lon")
+
+    lats = np.asarray(da["lat"].values, dtype=float)
+    lons = np.asarray(da["lon"].values, dtype=float)
     vals = da.values
-    lats = np.asarray(da.lat.values, dtype=float)
-    lons = np.asarray(da.lon.values, dtype=float)
 
     if lons.ndim > 1:
         lons = lons[0, :]
@@ -62,11 +114,16 @@ def _prepare_cyclic_grid(da: xr.DataArray):
 
     dlon = (lons[-1] - lons[0]) / (len(lons) - 1)
     cyclic_lon = np.append(lons, lons[-1] + dlon)
-    cyclic_vals = np.concatenate([vals, vals[:, 0:1]], axis=-1)
-    lon2d, lat2d = np.meshgrid(cyclic_lon, lats)
-    
-    return lon2d, lat2d, cyclic_vals, vals
+    cyclic_vals = np.concatenate([vals, vals[:, 0:1]], axis=1)
 
+    lon2d, lat2d = np.meshgrid(cyclic_lon, lats)
+
+    if cyclic_vals.shape != lon2d.shape:
+        raise ValueError(
+            f"Cyclic shape mismatch: cyclic_vals={cyclic_vals.shape}, lon2d={lon2d.shape}, lat2d={lat2d.shape}"
+        )
+
+    return lon2d, lat2d, cyclic_vals, vals
 
 def plot_acc_snr_overlay(
     acc_da: xr.DataArray,
@@ -96,6 +153,7 @@ def plot_acc_snr_overlay(
     )
 
     hatch_levels = [0.22, 0.5, 1.0, 2.0, 1e5]
+    hatch_levels = [ 0.1, 0.33, 0.96, 4.26, 1e5 ]
     snr_hatches = ["...", "///", "xxx", "***"]
     plt.rcParams["hatch.linewidth"] = 0.5
     plt.rcParams["hatch.color"] = "black"
@@ -106,10 +164,14 @@ def plot_acc_snr_overlay(
     )
 
     legend_elements = [
-        mpatches.Patch(facecolor="white", edgecolor="black", hatch="...", label="SNR 0.22 - 0.5"),
-        mpatches.Patch(facecolor="white", edgecolor="black", hatch="///", label="SNR 0.5 - 1"),
-        mpatches.Patch(facecolor="white", edgecolor="black", hatch="xxx", label="SNR 1 - 2"),
-        mpatches.Patch(facecolor="white", edgecolor="black", hatch="***", label="SNR > 2"),
+        #mpatches.Patch(facecolor="white", edgecolor="black", hatch="...", label="SNR 0.22 - 0.5"),
+        #mpatches.Patch(facecolor="white", edgecolor="black", hatch="///", label="SNR 0.5 - 1"),
+        #mpatches.Patch(facecolor="white", edgecolor="black", hatch="xxx", label="SNR 1 - 2"),
+        #mpatches.Patch(facecolor="white", edgecolor="black", hatch="***", label="SNR > 2"),
+        mpatches.Patch(facecolor="white", edgecolor="black", hatch="...", label="Rmod 0.3 - 0.5"),
+        mpatches.Patch(facecolor="white", edgecolor="black", hatch="///", label="Rmod 0.5 - 0.7"),
+        mpatches.Patch(facecolor="white", edgecolor="black", hatch="xxx", label="Rmod 0.7 - 0.9"),
+        mpatches.Patch(facecolor="white", edgecolor="black", hatch="***", label="Rmod > 0.9"),
     ]
     ax.legend(
         handles=legend_elements, loc="upper center", bbox_to_anchor=(0.5, -0.02),
@@ -119,7 +181,7 @@ def plot_acc_snr_overlay(
     cbar_ax = fig.add_axes([0.18, 0.08, 0.64, 0.025])
     cbar = fig.colorbar(
         im, cax=cbar_ax, orientation="horizontal", ticks=bounds, extend="neither",
-        label="Correlation Coefficient (0.1 to 1.0)"
+        label="Correlation Coefficient"
     )
     cbar.ax.tick_params(labelsize=9)
 
@@ -132,7 +194,6 @@ def plot_acc_snr_overlay(
     plt.savefig(output_png, dpi=150, bbox_inches="tight")
     plt.close()
     logger.info(f"✅ ACC + SNR overlay diagnostic saved to '{output_png}'!")
-
 
 def plot_skill_predictability_trio(
     acc_da: xr.DataArray,
@@ -148,10 +209,10 @@ def plot_skill_predictability_trio(
     Row 2: (c) Predictability Ratio (RPC) [Centered]
     """
     fig = plt.figure(figsize=(15, 11))
-    
+
     gs = fig.add_gridspec(
-        2, 4, 
-        hspace=0.32, wspace=0.15, 
+        2, 4,
+        hspace=0.32, wspace=0.15,
         top=0.91, bottom=0.08, left=0.04, right=0.96
     )
 
@@ -160,22 +221,50 @@ def plot_skill_predictability_trio(
     ax2 = fig.add_subplot(gs[0, 2:], projection=proj)
     ax3 = fig.add_subplot(gs[1, 1:3], projection=proj)
 
-    for ax in (ax1, ax2, ax3):
-        ax.set_facecolor(LAND_GRAY)  # Axis background matches light gray mask color
-        ax.add_feature(cfeature.LAND, facecolor=LAND_GRAY, zorder=2)
-        ax.add_feature(cfeature.COASTLINE, linewidth=0.5, edgecolor="black", zorder=5)
-        ax.add_feature(cfeature.BORDERS, linewidth=0.3, edgecolor="gray", linestyle=":", zorder=5)
-        ax.gridlines(draw_labels=False, linestyle=":", color="gray", alpha=0.3, zorder=6)
+    def _draw_manual_graticules(ax):
+        # Meridians
+        for lon in np.arange(-180, 181, 60):
+            lats = np.linspace(-89.5, 89.5, 360)
+            lons = np.full_like(lats, lon, dtype=float)
+            ax.plot(
+                lons, lats,
+                transform=ccrs.PlateCarree(),
+                linestyle="--",
+                linewidth=0.6,
+                color="black",
+                alpha=0.35,
+                zorder=20,
+            )
+        # Parallels
+        for lat in np.arange(-60, 61, 30):
+            lons = np.linspace(-180, 180, 720)
+            lats = np.full_like(lons, lat, dtype=float)
+            ax.plot(
+                lons, lats,
+                transform=ccrs.PlateCarree(),
+                linestyle="--",
+                linewidth=0.6,
+                color="black",
+                alpha=0.35,
+                zorder=20,
+            )
 
-    lon2d, lat2d, cyclic_acc, acc_vals = _prepare_cyclic_grid(acc_da)
-    _, _, cyclic_rpot, rpot_vals = _prepare_cyclic_grid(rpot_da)
-    _, _, cyclic_rpc, rpc_vals = _prepare_cyclic_grid(rpc_da)
+    for ax in (ax1, ax2, ax3):
+        ax.set_facecolor(LAND_GRAY)
+        ax.add_feature(cfeature.LAND, facecolor=LAND_GRAY, zorder=2)
+        ax.add_feature(cfeature.COASTLINE, linewidth=0.5, edgecolor="black", zorder=12)
+        ax.add_feature(cfeature.BORDERS, linewidth=0.3, edgecolor="gray", linestyle=":", zorder=12)
+
+    # Prepare cyclic grids separately for each field
+    lon2d_acc, lat2d_acc, cyclic_acc, acc_vals = _prepare_cyclic_grid(acc_da)
+    lon2d_rpot, lat2d_rpot, cyclic_rpot, rpot_vals = _prepare_cyclic_grid(rpot_da)
+    lon2d_rpc, lat2d_rpc, cyclic_rpc, rpc_vals = _prepare_cyclic_grid(rpc_da)
 
     cmap_acc, norm_acc, bounds_acc = create_acc_sfs_colormap()
 
     # --- Panel (a): Real-World ACC (r_mo) ---
     im1 = ax1.pcolormesh(
-        lon2d, lat2d, cyclic_acc, cmap=cmap_acc, norm=norm_acc, shading="auto",
+        lon2d_acc, lat2d_acc, cyclic_acc, cmap=cmap_acc, norm=norm_acc, shading="auto",
         transform=ccrs.PlateCarree(), zorder=3
     )
     median_acc = float(np.nanmedian(acc_vals))
@@ -186,7 +275,7 @@ def plot_skill_predictability_trio(
 
     # --- Panel (b): Model-World ACC (r_mw) ---
     ax2.pcolormesh(
-        lon2d, lat2d, cyclic_rpot, cmap=cmap_acc, norm=norm_acc, shading="auto",
+        lon2d_rpot, lat2d_rpot, cyclic_rpot, cmap=cmap_acc, norm=norm_acc, shading="auto",
         transform=ccrs.PlateCarree(), zorder=3
     )
     median_rpot = float(np.nanmedian(rpot_vals))
@@ -199,11 +288,11 @@ def plot_skill_predictability_trio(
     fig.canvas.draw()
     pos1 = ax1.get_position()
     pos2 = ax2.get_position()
-    
+
     cbar_x0 = pos1.x0 + 0.15 * (pos2.x1 - pos1.x0)
     cbar_width = 0.70 * (pos2.x1 - pos1.x0)
     cbar_y0 = pos1.y0 - 0.045
-    
+
     cbar_ax1 = fig.add_axes([cbar_x0, cbar_y0, cbar_width, 0.015])
     cbar1 = fig.colorbar(
         im1, cax=cbar_ax1, orientation="horizontal", ticks=bounds_acc, extend="neither",
@@ -214,7 +303,7 @@ def plot_skill_predictability_trio(
     # --- Panel (c): Predictability Ratio (RPC) ---
     cmap_rpc, norm_rpc, _ = create_rpc_colormap()
     ax3.pcolormesh(
-        lon2d, lat2d, cyclic_rpc, cmap=cmap_rpc, norm=norm_rpc, shading="auto",
+        lon2d_rpc, lat2d_rpc, cyclic_rpc, cmap=cmap_rpc, norm=norm_rpc, shading="auto",
         transform=ccrs.PlateCarree(), zorder=3
     )
     median_rpc = float(np.nanmedian(rpc_vals))
@@ -223,22 +312,19 @@ def plot_skill_predictability_trio(
         fontsize=10, pad=6
     )
 
-    # Column-First Legend Handle Order for Matplotlib ncol=3:
-    # Column 0: Dark Blue (< 0.5) top, Light Blue (0.5 - 0.8) bottom
-    # Column 1: Mint Green (0.8 - 1.2) top, Light Gray (Masked) bottom
-    # Column 2: Dark Red (> 1.6) top, Orange (1.2 - 1.6) bottom
+    # Manual graticules LAST (ensures visible over color fill)
+    _draw_manual_graticules(ax1)
+    _draw_manual_graticules(ax2)
+    _draw_manual_graticules(ax3)
+
+    # Column-First Legend Handle Order for Matplotlib ncol=3
     rpc_legend_elements = [
-        # --- Column 0 (Left Side: Overconfident) ---
-        mpatches.Patch(facecolor="#3182bd", edgecolor="black", label="< 0.5: Highly Overconfident"),        # Row 0, Col 0
-        mpatches.Patch(facecolor="#9ecae1", edgecolor="black", label="0.5 - 0.8: Overconfident"),           # Row 1, Col 0
-
-        # --- Column 1 (Middle: Well-Calibrated / Masked) ---
-        mpatches.Patch(facecolor="#c7e9c0", edgecolor="black", label="0.8 - 1.2: Well-Calibrated"),          # Row 0, Col 1
-        mpatches.Patch(facecolor=LAND_GRAY, edgecolor="black", label="Masked/No Signal"),                 # Row 1, Col 1
-
-        # --- Column 2 (Right Side: Underconfident) ---
-        mpatches.Patch(facecolor="#e6550d", edgecolor="black", label="> 1.6: Highly Underconfident (Strong S/N Paradox"),  # Row 0, Col 2 (Dark Red)
-        mpatches.Patch(facecolor="#fdae6b", edgecolor="black", label="1.2 - 1.6: Underconfident (S/N Paradox)"), # Row 1, Col 2 (Orange)
+        mpatches.Patch(facecolor="#3182bd", edgecolor="black", label="< 0.5: Highly Overconfident"),
+        mpatches.Patch(facecolor="#9ecae1", edgecolor="black", label="0.5 - 0.8: Overconfident"),
+        mpatches.Patch(facecolor="#c7e9c0", edgecolor="black", label="0.8 - 1.2: Well-Calibrated"),
+        mpatches.Patch(facecolor=LAND_GRAY, edgecolor="black", label="Masked/No Signal"),
+        mpatches.Patch(facecolor="#e6550d", edgecolor="black", label="> 1.6: Highly Underconfident (Strong S/N Paradox)"),
+        mpatches.Patch(facecolor="#fdae6b", edgecolor="black", label="1.2 - 1.6: Underconfident (S/N Paradox)"),
     ]
 
     ax3.legend(
@@ -246,7 +332,6 @@ def plot_skill_predictability_trio(
         ncol=3, frameon=False, fontsize=8, handletextpad=0.4, columnspacing=1.2
     )
 
-    # Master Title & Metadata Subtitle
     if subtitle_str:
         fig.suptitle(f"{main_title}\n{subtitle_str}", fontsize=12, fontweight="bold", y=0.97)
     else:

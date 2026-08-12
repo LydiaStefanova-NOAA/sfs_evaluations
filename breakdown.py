@@ -37,6 +37,7 @@ from preprocess.spatial_alignment import (
     nan_report,
 )
 from metrics.snr import _linear_detrend
+from metrics.acc import compute_acc
 from viz.spatial import _prepare_cyclic_grid, LAND_GRAY
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
@@ -55,23 +56,59 @@ OBS_NAME_MAP = {"atm": "ERA5", "ice": "ORAS5", "ocn": "ORAS5"}
 DOMAIN_LABEL_MAP = {"atm": "Atmospheric", "ice": "SeaIce", "ocn": "Oceanic"}
 DEFAULT_VARS = {"atm": "TMP2m", "ice": "aice_h", "ocn": "SSH"}
 
+def _draw_manual_graticules(ax):
+    """
+    Draw robust dashed lat/lon lines manually (works reliably across backends/projections).
+    """
+    # Meridians every 60°
+    for lon in np.arange(-180, 181, 60):
+        lats = np.linspace(-89.5, 89.5, 360)
+        lons = np.full_like(lats, lon, dtype=float)
+        ax.plot(
+            lons,
+            lats,
+            transform=ccrs.PlateCarree(),
+            linestyle="--",
+            linewidth=0.3,
+            color="black",
+            alpha=0.35,
+            zorder=20,
+        )
+
+    # Parallels every 30° (avoid exact poles)
+    for lat in np.arange(-60, 61, 30):
+        lons = np.linspace(-180, 180, 720)
+        lats = np.full_like(lons, lat, dtype=float)
+        ax.plot(
+            lons,
+            lats,
+            transform=ccrs.PlateCarree(),
+            linestyle="--",
+            linewidth=0.6,
+            color="black",
+            alpha=0.35,
+            zorder=20,
+        )
 
 def compute_variance_ratios(
     sfs_da: xr.DataArray,
     obs_da: xr.DataArray,
+    sfs_clim_da: xr.DataArray | None = None,
+    obs_clim_da: xr.DataArray | None = None,
     year_dim: str = "year",
     member_dim: str = "member",
     detrend: bool = True,
     varobs_eps: float = 1e-12,
     mse_eps: float = 1e-12,
+    nvr_method: str = "mse",
+    acc_eps: float = 1e-12,
     debug: bool = False,
 ) -> tuple[xr.DataArray, xr.DataArray]:
     """
-    Computes Signal Variance Ratio (SVR) and Noise-to-MSE Variance Ratio (NVR):
+    Computes:
       SVR = Var(signal_mod) / Var(obs)
-      NVR = Var(noise_mod) / MSE
-
-    Epsilon thresholds are used to stabilize near-zero denominators.
+      NVR (mse) = Var(noise_mod) / MSE
+      NVR (acc_varobs) = Var(noise_mod) / ((1 - ACC^2) * Var(obs))
     """
     common_years = np.intersect1d(sfs_da[year_dim].values, obs_da[year_dim].values)
     if common_years.size == 0:
@@ -105,13 +142,43 @@ def compute_variance_ratios(
     svr_da.name = "svr"
     svr_da.attrs["long_name"] = "Ratio of model signal vs obs variance (Var_signal / Var_obs)"
 
-    nvr_da = var_noise_mod / mse.where(mse > mse_eps)
+    if nvr_method == "mse":
+        denom = mse.where(mse > mse_eps)
+        nvr_da = var_noise_mod / denom
+        nvr_da.attrs["long_name"] = "Ratio of model noise vs MSE (Var_noise / MSE)"
+        nvr_da.attrs["nvr_method"] = "mse"
+
+    elif nvr_method == "acc_varobs":
+        if sfs_clim_da is None or obs_clim_da is None:
+            raise ValueError("nvr_method='acc_varobs' requires sfs_clim_da and obs_clim_da.")
+
+        acc_da = compute_acc(
+            sfs_da=sfs_da,
+            obs_da=obs_da,
+            sfs_clim=sfs_clim_da,
+            obs_clim=obs_clim_da,
+            detrend=detrend,
+        )
+
+        one_minus_acc2 = (1.0 - (acc_da ** 2)).where((1.0 - (acc_da ** 2)) > acc_eps)
+        denom = (one_minus_acc2 * var_obs).where((one_minus_acc2 * var_obs) > varobs_eps)
+
+        nvr_da = var_noise_mod / denom
+        nvr_da.attrs["long_name"] = "Ratio of model noise vs ((1-ACC^2)*Var_obs)"
+        nvr_da.attrs["nvr_method"] = "acc_varobs"
+
+    else:
+        raise ValueError("nvr_method must be one of: ['mse', 'acc_varobs']")
+
     nvr_da.name = "nvr"
-    nvr_da.attrs["long_name"] = "Ratio of model noise vs MSE (Var_noise / MSE)"
 
     if debug:
+        nan_report("var_signal_mod", var_signal_mod)
         nan_report("var_obs", var_obs)
+        nan_report("var_noise_mod", var_noise_mod)
         nan_report("mse", mse)
+        if nvr_method == "acc_varobs":
+            nan_report("acc_da", acc_da)
         nan_report("svr", svr_da)
         nan_report("nvr", nvr_da)
 
@@ -126,8 +193,8 @@ def plot_variance_diagnostics_map(
 ):
     """
     Plots a 2-Panel Side-by-Side Spatial Map:
-    (a) Signal Variance Ratio (Var_signal_mod / Var_obs)
-    (b) Noise-to-MSE Variance Ratio (Var_noise_mod / MSE)
+    (a) Signal Variance Ratio (Var_signal_mod / Var_obs) -> Teal to Orange/Brown
+    (b) Noise Variance Ratio -> 95% CI-based Divergent Palette (Navy -> Ice Blue -> Plum)
     """
     fig = plt.figure(figsize=(16, 6.5))
     gs = fig.add_gridspec(1, 2, wspace=0.12, top=0.88, bottom=0.15, left=0.04, right=0.96)
@@ -143,11 +210,22 @@ def plot_variance_diagnostics_map(
         ax.add_feature(cfeature.BORDERS, linewidth=0.3, edgecolor="gray", linestyle=":", zorder=5)
         ax.gridlines(draw_labels=False, linestyle=":", color="gray", alpha=0.3, zorder=6)
 
-    # Panel (a)
+    # -------------------------------------------------------------------------
+    # Panel (a): Signal Variance Ratio
+    # [ <= 1.0: Physically Bounded ]
+    # [ 1.0 - 1.85: Moderate Inflation (p > 0.05) ]
+    # [ > 1.85: Significant Inflation (p < 0.05) ]
+    # -------------------------------------------------------------------------
     lon2d, lat2d, cyclic_svr, svr_vals = _prepare_cyclic_grid(svr_da)
 
-    svr_bounds = [0.0, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0]
-    svr_colors = ['#f7fcf5', '#e0f3db', '#c7e9c0', '#a1d99b', '#fdae6b', '#f16913', '#d94801', '#8c2d04']
+    # 1.85 corresponds to the 95% 1-tailed F-test critical threshold for N=31 (df=30)
+    svr_bounds = [0.0, 0.25, 0.5, 0.75, 1.0, 1.85, 3.0, 5.0]
+
+    svr_colors = [
+        '#f7fcfd', '#ccece6', '#66c2a4', '#238b45',  # <= 1.0:  Physically Bounded (Teal)
+        '#fed976',                                  # 1.0–1.85: Moderate Inflation / Sampling Uncertain (Amber)
+        '#f16913', '#8c2d04'                        # > 1.85:  Statistically Significant Inflation (Orange/Brown)
+    ]
     cmap_svr = mcolors.ListedColormap(svr_colors)
     cmap_svr.set_bad(color=(0, 0, 0, 0))
     cmap_svr.set_over('#4a1403')
@@ -161,8 +239,8 @@ def plot_variance_diagnostics_map(
     ax1.set_title(
         rf"$\mathbf{{(a)\ Signal\ Variance\ Ratio}}\ (\sigma^2_{{\mathrm{{signal,mod}}}} / \sigma^2_{{\mathrm{{obs}}}}) \mid \mathbf{{Spatial\ Median:\ {med_svr:.2f}}}$"
         "\n"
-        "[ ≤ 1.0: Physically Bounded  |  > 1.0: Signal Inflated ]",
-        fontsize=9, pad=6
+        "[ ≤ 1.0: Bounded  |  1.0–1.85: Moderate Inflation  |  > 1.85: Significant Inflation (95% CI) ]",
+        fontsize=8.5, pad=6
     )
 
     cbar_ax1 = fig.add_axes([0.08, 0.08, 0.38, 0.025])
@@ -171,15 +249,22 @@ def plot_variance_diagnostics_map(
         label="Signal Variance Ratio"
     )
     cbar1.ax.tick_params(labelsize=8)
-
-    # Panel (b)
+    # -------------------------------------------------------------------------
+    # Panel (b): Noise Variance Ratio (95% CI centered at [0.5, 2.0])
+    # -------------------------------------------------------------------------
     _, _, cyclic_nvr, nvr_vals = _prepare_cyclic_grid(nvr_da)
 
-    nvr_bounds = [0.0, 0.1, 0.25, 0.5, 0.8, 1.2, 2.0, 5.0]
-    nvr_colors = ['#08519c', '#3182bd', '#6baed6', '#9ecae1', '#c7e9c0', '#fdae6b', '#e6550d']
+    # Bounds anchored on 95% F-test Confidence Interval [0.5, 2.0] for N=30
+    nvr_bounds = [0.0, 0.25, 0.5, 2.0, 4.0, 8.0]
+    
+    nvr_colors = [
+        '#1e3a8a', '#3b82f6',  # < 0.5: Statistically Under-Dispersed (Navy / Blue)
+        '#dbeafe',             # 0.5 - 2.0: 95% CI Statistically Well-Calibrated (Ice Blue)
+        '#c026d3', '#701a75'   # > 2.0: Statistically Over-Dispersed (Magenta / Dark Plum)
+    ]
     cmap_nvr = mcolors.ListedColormap(nvr_colors)
     cmap_nvr.set_bad(color=(0, 0, 0, 0))
-    cmap_nvr.set_over('#a50f15')
+    cmap_nvr.set_over('#4c0519')
     norm_nvr = mcolors.BoundaryNorm(nvr_bounds, cmap_nvr.N)
 
     im2 = ax2.pcolormesh(
@@ -187,19 +272,34 @@ def plot_variance_diagnostics_map(
         transform=ccrs.PlateCarree(), zorder=3
     )
     med_nvr = float(np.nanmedian(nvr_vals))
+    nvr_method = nvr_da.attrs.get("nvr_method", "mse")
+
+    if nvr_method == "acc_varobs":
+        nvr_title_math = r"\sigma^2_{\mathrm{noise,mod}} / ((1-\mathrm{ACC}^2)\sigma^2_{\mathrm{obs}})"
+        nvr_label = "Noise / ((1-ACC²)·Var_obs)"
+    else:
+        nvr_title_math = r"\sigma^2_{\mathrm{noise,mod}} / \mathrm{MSE}"
+        nvr_label = "Noise-to-MSE Variance Ratio"
+
+    nvr_subtitle = "[ < 0.5: Under-Dispersed  |  0.5–2.0: Calibrated (95% CI)  |  > 2.0: Over-Dispersed ]"
+
     ax2.set_title(
-        rf"$\mathbf{{(b)\ Noise\text{{-}}to\text{{-}}MSE\ Variance\ Ratio}}\ (\sigma^2_{{\mathrm{{noise,mod}}}} / \mathrm{{MSE}}) \mid \mathbf{{Spatial\ Median:\ {med_nvr:.2f}}}$"
+        rf"$\mathbf{{(b)\ Noise\ Variance\ Ratio}}\ ({nvr_title_math}) \mid \mathbf{{Spatial\ Median:\ {med_nvr:.2f}}}$"
         "\n"
-        "[ « 1.0: Severe Under-Dispersion  |  ≈ 1.0: Well-Calibrated Spread ]",
+        + nvr_subtitle,
         fontsize=9, pad=6
     )
 
     cbar_ax2 = fig.add_axes([0.54, 0.08, 0.38, 0.025])
     cbar2 = fig.colorbar(
         im2, cax=cbar_ax2, orientation="horizontal", ticks=nvr_bounds, extend="max",
-        label="Noise-to-MSE Variance Ratio"
+        label=nvr_label
     )
     cbar2.ax.tick_params(labelsize=8)
+
+    # Draw lat/lon dashed lines on top of color field
+    _draw_manual_graticules(ax1)
+    _draw_manual_graticules(ax2)
 
     fig.suptitle(title_str, fontsize=12, fontweight="bold", y=0.97)
     os.makedirs(os.path.dirname(output_png), exist_ok=True)
@@ -207,7 +307,6 @@ def plot_variance_diagnostics_map(
     plt.close()
 
     logger.info(f"✅ Spatial variance breakdown plot saved to '{output_png}'!")
-
 
 def run_variance_diagnostic_cli(
     component: str = "ocn",
@@ -221,6 +320,8 @@ def run_variance_diagnostic_cli(
     leads_override: list[int] = None,
     varobs_eps: float = 1e-12,
     mse_eps: float = 1e-12,
+    nvr_method: str = "mse",
+    acc_eps: float = 1e-12,
     debug: bool = False,
 ):
     comp = component.lower()
@@ -251,11 +352,19 @@ def run_variance_diagnostic_cli(
     domain_label = DOMAIN_LABEL_MAP[comp]
     obs_label = OBS_NAME_MAP[comp]
     logger.info(f"=== Starting {season_str} {domain_label} SNR Variance Breakdown Diagnostic ({var_name}) ===")
+    logger.info(f"NVR method: {nvr_method}")
 
     # 1) SFS (keep preprocess defaults)
     ds_sfs_raw = get_sfs_data(init_month=init_month, domain=comp, requested_vars=[var_name])
     ds_sfs = PREPROCESS_MAP[comp](ds_sfs_raw)
     sfs_season_da = ds_sfs[var_name].sel(lead=leads).mean(dim="lead", skipna=True)
+
+    # Climatology fields needed for ACC-based NVR
+    clim_dims = [d for d in ["year", "init", "time", "member", "number", "ens"] if d in ds_sfs[var_name].dims]
+    sfs_clim_full = ds_sfs[var_name].mean(dim=clim_dims, skipna=True) if clim_dims else ds_sfs[var_name]
+    if "lead" not in sfs_clim_full.dims:
+        raise ValueError(f"SFS climatology for {var_name} has no 'lead' dimension; dims={sfs_clim_full.dims}")
+    sfs_clim_da = sfs_clim_full.sel(lead=leads).mean(dim="lead", skipna=True)
 
     # 2) OBS aligned by init-year + leads
     ds_obs_raw = OBS_DATA_MAP[comp](requested_vars=[var_name])
@@ -268,6 +377,7 @@ def run_variance_diagnostic_cli(
         time_dim="time",
         require_complete=True,
     )
+    obs_clim_da = obs_season_da.mean(dim="year", skipna=True)
 
     # 3) Standardize + canonicalize + common years
     sfs_season_da = standardize_year_dim(sfs_season_da)
@@ -275,6 +385,8 @@ def run_variance_diagnostic_cli(
 
     sfs_season_da = canonicalize_lonlat(sfs_season_da)
     obs_season_da = canonicalize_lonlat(obs_season_da)
+    sfs_clim_da = canonicalize_lonlat(sfs_clim_da)
+    obs_clim_da = canonicalize_lonlat(obs_clim_da)
 
     sfs_season_da, obs_season_da, eval_years = select_common_eval_years(
         sfs_season_da, obs_season_da, start_year=start_year, end_year=end_year
@@ -282,14 +394,19 @@ def run_variance_diagnostic_cli(
 
     # Explicit collocation
     obs_season_da = align_obs_to_sfs_grid(obs_season_da, sfs_season_da, method="linear")
+    obs_clim_da = align_obs_to_sfs_grid(obs_clim_da, sfs_clim_da, method="linear")
 
     # Eager load
     sfs_season_da = sfs_season_da.squeeze(drop=True).load()
     obs_season_da = obs_season_da.squeeze(drop=True).load()
+    sfs_clim_da = sfs_clim_da.squeeze(drop=True).load()
+    obs_clim_da = obs_clim_da.squeeze(drop=True).load()
 
     if debug:
         grid_report("SFS seasonal", sfs_season_da)
         grid_report("OBS seasonal aligned", obs_season_da)
+        grid_report("SFS climatology", sfs_clim_da)
+        grid_report("OBS climatology aligned", obs_clim_da)
         nan_report("SFS seasonal", sfs_season_da)
         nan_report("OBS seasonal aligned", obs_season_da)
 
@@ -302,16 +419,25 @@ def run_variance_diagnostic_cli(
 
     if output_png is None:
         detrend_str = "_detrended" if detrend else ""
+        method_str = "_nvraccvarobs" if nvr_method == "acc_varobs" else ""
         output_png = (
             f"figures/{comp}_{season_str.lower()}_{var_name.lower()}_variance_breakdown_"
-            f"init{init_month:02d}_{actual_start}-{actual_end}{detrend_str}.png"
+            f"init{init_month:02d}_{actual_start}-{actual_end}{detrend_str}{method_str}.png"
         )
 
     # 4) Metrics
     logger.info(f"Computing Variance Ratios (SVR & NVR) against {obs_label}...")
     svr_da, nvr_da = compute_variance_ratios(
-        sfs_season_da, obs_season_da, detrend=detrend,
-        varobs_eps=varobs_eps, mse_eps=mse_eps, debug=debug
+        sfs_da=sfs_season_da,
+        obs_da=obs_season_da,
+        sfs_clim_da=sfs_clim_da,
+        obs_clim_da=obs_clim_da,
+        detrend=detrend,
+        varobs_eps=varobs_eps,
+        mse_eps=mse_eps,
+        nvr_method=nvr_method,
+        acc_eps=acc_eps,
+        debug=debug,
     )
 
     svr_da = canonicalize_lonlat(svr_da)
@@ -341,9 +467,22 @@ if __name__ == "__main__":
     parser.add_argument("--end-year", type=int, default=2022)
     parser.add_argument("--no-detrend", action="store_true")
 
-    # stability / debug controls
+    # stability / method controls
     parser.add_argument("--varobs-eps", type=float, default=1e-12)
     parser.add_argument("--mse-eps", type=float, default=1e-12)
+    parser.add_argument(
+        "--nvr-method",
+        type=str,
+        default="mse",
+        choices=["mse", "acc_varobs"],
+        help="NVR denominator: 'mse' -> MSE, 'acc_varobs' -> (1-ACC^2)*Var_obs",
+    )
+    parser.add_argument(
+        "--acc-eps",
+        type=float,
+        default=1e-12,
+        help="Lower bound for (1 - ACC^2) when using --nvr-method acc_varobs",
+    )
     parser.add_argument("--debug", action="store_true")
 
     args = parser.parse_args()
@@ -359,5 +498,7 @@ if __name__ == "__main__":
         leads_override=args.leads,
         varobs_eps=args.varobs_eps,
         mse_eps=args.mse_eps,
+        nvr_method=args.nvr_method,
+        acc_eps=args.acc_eps,
         debug=args.debug,
-    )
+        )
