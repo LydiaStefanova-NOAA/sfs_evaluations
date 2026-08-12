@@ -94,8 +94,9 @@ def compute_rpc(acc_da: xr.DataArray, rpot_da: xr.DataArray) -> xr.DataArray:
     # Guard against division by zero or extremely low potential skill
     rpot_guarded = rpot_da.where(rpot_da > 0.05)
     rpc = acc_da / rpot_guarded
-
     #rpc = rpc.where(acc_da >= 0.3) # mask out places where the RPC is irrelevant (ACC insignificant)
+    # Trying out masking areas that have low ACC in both model and real-world
+    rpc = rpc.where((acc_da >= 0.3)|(rpot_guarded >=0.3)) # mask out places where the RPC is irrelevant (ACC insignificant)
 
     
     rpc.name = "rpc"
