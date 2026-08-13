@@ -2,7 +2,7 @@
 Test script to inspect the static MOM6 grid file and verify analytical vector rotation.
 """
 import xarray as xr
-from sources.sfs import get_sfs_data
+from sources.sfs import sfs
 from preprocess.vector_rotation import load_static_grid_rotation, rotate_tripolar_vectors
 
 STATIC_PATH = "/scratch4/BMC/gsienkf/Philip.Pegion/replay_evaluation/ocn_data/ocn_grid_info.nc"
