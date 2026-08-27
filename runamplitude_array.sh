@@ -19,25 +19,17 @@ source /scratch4/NCEPDEV/ovp/Lydia.B.Stefanova/miniconda/bin/activate sfs_evalua
 # Build list of all parameter strings
 PARAMS=()
 
-#for script in "test_unified_snr_acc.py" "breakdown.py" "trend_maps.py"; do
-for script in "breakdown.py" "trend_maps.py"; do
-  # Append --nvr_method acc_varobs ONLY when running breakdown.py
-  EXTRA_ARGS=""
-  if [ "$script" == "breakdown.py" ]; then
-    EXTRA_ARGS="--nvr-method acc_varobs"
-    EXTRA_ARGS="--nvr-method mse"
-  fi
-
+for script in "amplitude_diagnostic.py"; do
   # Atmospheric variables
   for var in Z500 U200 U850 T200 T850 MSLP TMP2m U10m V10m; do
-    PARAMS+=("$script -c atm -v $var -i 05 -L 1 2 3 $EXTRA_ARGS")
-    PARAMS+=("$script -c atm -v $var -i 05 -L 7 8 9 $EXTRA_ARGS")
+    PARAMS+=("$script -c atm -v $var -i 05 -L 1 2 3 ")
+    PARAMS+=("$script -c atm -v $var -i 05 -L 7 8 9 ")
   done
 
   # Ocean variables
   for var in taux tauy dt20c SST SSS SSH ocnheat MLD_003; do
-    PARAMS+=("$script -c ocn -v $var -i 05 -L 1 2 3 $EXTRA_ARGS")
-    PARAMS+=("$script -c ocn -v $var -i 05 -L 7 8 9 $EXTRA_ARGS")
+    PARAMS+=("$script -c ocn -v $var -i 05 -L 1 2 3 ")
+    PARAMS+=("$script -c ocn -v $var -i 05 -L 7 8 9 ")
   done
 done
 
