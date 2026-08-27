@@ -4,16 +4,17 @@ Anomaly Correlation Coefficient (ACC) Metric Functions
 import logging
 import numpy as np
 import xarray as xr
+from preprocess.climatology import _linear_detrend
 
 logger = logging.getLogger(__name__)
 
 
-def _linear_detrend(da: xr.DataArray, dim: str = "year") -> xr.DataArray:
-    """Subtract a linear trend along the specified dimension using xarray polyfit/polyval."""
-    # Fit 1st degree polynomial across time dimension
-    poly_coeffs = da.polyfit(dim=dim, deg=1)
-    trend = xr.polyval(da[dim], poly_coeffs.polyfit_coefficients)
-    return da - trend
+#def _linear_detrend(da: xr.DataArray, dim: str = "year") -> xr.DataArray:
+#    """Subtract a linear trend along the specified dimension using xarray polyfit/polyval."""
+#    # Fit 1st degree polynomial across time dimension
+#    poly_coeffs = da.polyfit(dim=dim, deg=1)
+#    trend = xr.polyval(da[dim], poly_coeffs.polyfit_coefficients)
+#    return da - trend
 
 
 def compute_acc(
