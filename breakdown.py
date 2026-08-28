@@ -276,7 +276,7 @@ def run_variance_diagnostic_cli(
         from viz.spatial_verification import plot_scaling_factors_map, plot_msess_map
         from metrics.ser import compute_ser_before_after
         from viz.spatial_ser import plot_ser_comparison_map
-        from metrics.reliability import compute_reliability_curves
+        from metrics.reliability import compute_reliability_curve
         from viz.plot_reliability import plot_reliability_diagram
 
         logger.info("Step 8: Generating Section 5 verification & recalibration plots...")

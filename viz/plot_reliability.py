@@ -38,6 +38,7 @@ def plot_reliability_diagram(
     ]
 
     for ax_top, ax_bot, rdata, panel_title in panels:
+        # --- Top Subpanel: Reliability Curve ---
         ax_top.plot([0, 1], [0, 1], "k--", linewidth=1.2, label="Perfect Reliability (1:1)", zorder=2)
         ax_top.plot(rdata["prob_pred_raw"], rdata["prob_obs_raw"], "o--", color="#d95f02", linewidth=2, markersize=6, label="Raw Model", zorder=4)
         ax_top.plot(rdata["prob_pred_cal"], rdata["prob_obs_cal"], "s-", color="#1b9e77", linewidth=2.2, markersize=6, label="Calibrated Model", zorder=5)
@@ -48,6 +49,7 @@ def plot_reliability_diagram(
         ax_top.set_title(panel_title, fontsize=10.5, fontweight="bold", pad=8)
         ax_top.legend(loc="upper left", frameon=True, fontsize=8.5)
 
+        # --- Bottom Subpanel: Sharpness / Frequency Histogram ---
         width = 0.03
         centers = rdata["bin_centers"]
         t_raw, t_cal = np.sum(rdata["counts_raw"]), np.sum(rdata["counts_cal"])
@@ -60,8 +62,14 @@ def plot_reliability_diagram(
 
         ax_bot.set_xlabel("Forecasted Probability Bin", fontsize=9.5, fontweight="bold")
         ax_bot.grid(True, linestyle=":", alpha=0.5)
-        ax_bot.set_yscale("log")
-        ax_bot.set_ylim([0.1, 100.0])
+
+        # Safe Log Scale handling: Only log-scale if positive values exist
+        has_positive_values = np.any(freq_raw > 0) or np.any(freq_cal > 0)
+        if has_positive_values:
+            ax_bot.set_yscale("log")
+            ax_bot.set_ylim([0.1, 100.0])
+        else:
+            ax_bot.set_ylim([0.0, 100.0])
 
     ax1_top.set_ylabel("Observed Relative Frequency", fontsize=9.5, fontweight="bold")
     ax1_bot.set_ylabel("Frequency (%)", fontsize=8.5, fontweight="bold")
