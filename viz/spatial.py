@@ -51,6 +51,17 @@ def _draw_manual_graticules(ax):
             zorder=20,
         )
 
+import os
+import logging
+import numpy as np
+import xarray as xr
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+
+logger = logging.getLogger(__name__)
+LAND_GRAY = "#f0f0f0"  # Softer land background
 
 def plot_variance_diagnostics_map(
     svr_da: xr.DataArray,
@@ -64,9 +75,14 @@ def plot_variance_diagnostics_map(
     from metrics.confidence import compute_dynamic_ci_bounds
 
     # Dynamically compute bounds
-    svr_bounds, nvr_bounds, svr_crit, (nvr_low, nvr_high) = compute_dynamic_ci_bounds(
+    _, _, svr_crit, (nvr_low, nvr_high) = compute_dynamic_ci_bounds(
         n_years=n_years, n_members=n_members, detrend=detrend
     )
+
+    # 5-bin dynamic bounds anchored around 1.0
+    low_outer = round(nvr_low * 0.5, 2)
+    high_outer = round(nvr_high * 1.5, 2)
+    five_bin_bounds = [0.0, low_outer, nvr_low, nvr_high, high_outer, 5.0]
 
     fig = plt.figure(figsize=(16, 6.5))
     gs = fig.add_gridspec(1, 2, wspace=0.12, top=0.88, bottom=0.15, left=0.04, right=0.96)
@@ -78,88 +94,92 @@ def plot_variance_diagnostics_map(
     for ax in (ax1, ax2):
         ax.set_facecolor(LAND_GRAY)
         ax.add_feature(cfeature.LAND, facecolor=LAND_GRAY, zorder=2)
-        ax.add_feature(cfeature.COASTLINE, linewidth=0.5, edgecolor="black", zorder=5)
+        ax.add_feature(cfeature.COASTLINE, linewidth=0.5, edgecolor="#404040", zorder=5)
         ax.add_feature(cfeature.BORDERS, linewidth=0.3, edgecolor="gray", linestyle=":", zorder=5)
         ax.gridlines(draw_labels=False, linestyle=":", color="gray", alpha=0.3, zorder=6)
 
-    # --- Panel (a): SVR ---
-#    lon2d, lat2d, cyclic_svr, svr_vals = _prepare_cyclic_grid(svr_da)
-#    svr_colors = ['#f7fcfd', '#ccece6', '#66c2a4', '#238b45', '#fed976', '#f16913', '#8c2d04']
-#    cmap_svr = mcolors.ListedColormap(svr_colors[:len(svr_bounds)-1])
-#    cmap_svr.set_bad(color=(0, 0, 0, 0))
-#    cmap_svr.set_over('#4a1403')
-#    norm_svr = mcolors.BoundaryNorm(svr_bounds, cmap_svr.N)
-#
-#    im1 = ax1.pcolormesh(lon2d, lat2d, cyclic_svr, cmap=cmap_svr, norm=norm_svr, shading="auto", transform=ccrs.PlateCarree(), zorder=3)
-#    med_svr = float(np.nanmedian(svr_vals))
-#    
-#    ax1.set_title(
-#        rf"$\mathbf{{(a)\ Signal\ Variance\ Ratio}}\ (\sigma^2_{{\mathrm{{signal,mod}}}} / \sigma^2_{{\mathrm{{obs}}}}) \mid \mathbf{{Spatial\ Median:\ {med_svr:.2f}}}$"
-#        "\n"
-#        f"[ ≤ 1.0: Bounded  |  1.0–{svr_crit:.2f}: Moderate Inflation  |  > {svr_crit:.2f}: Significant Inflation (95% CI, N={n_years}) ]",
-#        fontsize=8.5, pad=6
-#    )
-#
-#    cbar_ax1 = fig.add_axes([0.08, 0.08, 0.38, 0.025])
-#    cbar1 = fig.colorbar(im1, cax=cbar_ax1, orientation="horizontal", ticks=svr_bounds, extend="max", label="Signal Variance Ratio")
-#    cbar1.ax.tick_params(labelsize=8)
-#
-    # --- Panel (a): SVR ---
+    nvr_method = nvr_da.attrs.get("nvr_method", "mse")
+
+    # =========================================================================
+    # --- PANEL (a): SIGNAL VARIANCE RATIO (SVR) SETUP ---
+    # =========================================================================
+    # Muted palette: Steel Blue (Deficit) -> Off-White (1.0) -> Warm Rust (Inflation)
+    svr_colors_5 = ['#4575b4', '#abd9e9', '#f7f7f7', '#fdae61', '#d73027']
+
+    if nvr_method == "acc_varobs":
+        svr_math = r"\sigma^2_{\mathrm{signal,mod}} / (\mathrm{ACC}^2 \cdot \sigma^2_{\mathrm{obs}})"
+        svr_subtitle = (
+            f"[ Sev. Deficit: <{low_outer:.2f} | Deficit: {low_outer:.2f}–{nvr_low:.2f} | "
+            f"Calibrated: {nvr_low:.2f}–{nvr_high:.2f} | Inflated: {nvr_high:.2f}–{high_outer:.2f} | Sev. Infl.: >{high_outer:.2f} ]"
+        )
+        svr_bounds = five_bin_bounds
+        svr_colors = svr_colors_5
+        svr_cbar_label = "Signal / (ACC² · Var_obs)"
+    else:
+        svr_math = r"\sigma^2_{\mathrm{signal,mod}} / \sigma^2_{\mathrm{obs}}"
+        svr_subtitle = f"[ ≤ 1.0: Bounded  |  1.0–{svr_crit:.2f}: Moderate Inflation  |  > {svr_crit:.2f}: Significant Inflation (95% CI, N={n_years}) ]"
+        svr_bounds = [0.0, 0.25, 0.50, 0.75, 1.00, svr_crit, 3.00, 5.00]
+        svr_colors = ['#313695', '#4575b4', '#74add1', '#f7f7f7', '#fdae61', '#f46d43', '#a50026']
+        svr_cbar_label = "Signal / Var_obs"
+
     lon2d, lat2d, cyclic_svr, svr_vals = _prepare_cyclic_grid(svr_da)
-    svr_colors = ['#f7fcfd', '#ccece6', '#66c2a4', '#238b45', '#fed976', '#f16913', '#8c2d04']
-    cmap_svr = mcolors.ListedColormap(svr_colors[:len(svr_bounds)-1])
+    cmap_svr = mcolors.ListedColormap(svr_colors)
     cmap_svr.set_bad(color=(0, 0, 0, 0))
-    cmap_svr.set_over('#4a1403')
+    cmap_svr.set_over('#7a0177')
     norm_svr = mcolors.BoundaryNorm(svr_bounds, cmap_svr.N)
 
     im1 = ax1.pcolormesh(lon2d, lat2d, cyclic_svr, cmap=cmap_svr, norm=norm_svr, shading="auto", transform=ccrs.PlateCarree(), zorder=3)
     med_svr = float(np.nanmedian(svr_vals))
 
-    # Read method from attributes (or pass nvr_method into plot function)
-    nvr_method = nvr_da.attrs.get("nvr_method", "mse")
-
-    svr_title_math = (
-        r"\sigma^2_{\mathrm{signal,mod}} / (\mathrm{ACC}^2 \cdot \sigma^2_{\mathrm{obs}})"
-        if nvr_method == "acc_varobs"
-        else r"\sigma^2_{\mathrm{signal,mod}} / \sigma^2_{\mathrm{obs}}"
-    )
-
     ax1.set_title(
-        rf"$\mathbf{{(a)\ Signal\ Variance\ Ratio}}\ ({svr_title_math}) \mid \mathbf{{Spatial\ Median:\ {med_svr:.2f}}}$"
-        "\n"
-        f"[ ≤ 1.0: Bounded  |  1.0–{svr_crit:.2f}: Moderate Inflation  |  > {svr_crit:.2f}: Significant Inflation (95% CI, N={n_years}) ]",
-        fontsize=8.5, pad=6
+        rf"$\mathbf{{(a)\ Signal\ Variance\ Ratio}}\ ({svr_math}) \mid \mathbf{{Spatial\ Median:\ {med_svr:.2f}}}$"
+        f"\n{svr_subtitle}",
+        fontsize=8.0, pad=6
     )
+
     cbar_ax1 = fig.add_axes([0.08, 0.08, 0.38, 0.025])
-    cbar1 = fig.colorbar(im1, cax=cbar_ax1, orientation="horizontal", ticks=svr_bounds, extend="max", label="Signal Variance Ratio")
+    cbar1 = fig.colorbar(im1, cax=cbar_ax1, orientation="horizontal", ticks=svr_bounds, extend="max", label=svr_cbar_label)
     cbar1.ax.tick_params(labelsize=8)
 
-    # --- Panel (b): NVR ---
+    # =========================================================================
+    # --- PANEL (b): NOISE VARIANCE RATIO (NVR) SETUP ---
+    # =========================================================================
+    # Muted palette: Soft Teal (Under) -> Off-White (1.0) -> Soft Plum/Berry (Over)
+    nvr_colors_5 = ['#01665e', '#80cdc1', '#f7f7f7', '#df65b0', '#980043']
+
+    if nvr_method == "acc_varobs":
+        nvr_math = r"\sigma^2_{\mathrm{noise,mod}} / ((1-\mathrm{ACC}^2)\sigma^2_{\mathrm{obs}})"
+        nvr_cbar_label = "Noise / ((1 - ACC²) · Var_obs)"
+    else:
+        nvr_math = r"\sigma^2_{\mathrm{noise,mod}} / \mathrm{MSE}"
+        nvr_cbar_label = "Noise / MSE"
+
+    nvr_subtitle = (
+        f"[ Sev. Under: <{low_outer:.2f} | Under: {low_outer:.2f}–{nvr_low:.2f} | "
+        f"Calibrated: {nvr_low:.2f}–{nvr_high:.2f} | Over: {nvr_high:.2f}–{high_outer:.2f} | Sev. Over: >{high_outer:.2f} ]"
+    )
+    nvr_bounds = five_bin_bounds
+
     _, _, cyclic_nvr, nvr_vals = _prepare_cyclic_grid(nvr_da)
-    nvr_colors = ['#1e3a8a', '#3b82f6', '#dbeafe', '#c026d3', '#701a75']
-    cmap_nvr = mcolors.ListedColormap(nvr_colors[:len(nvr_bounds)-1])
+    cmap_nvr = mcolors.ListedColormap(nvr_colors_5)
     cmap_nvr.set_bad(color=(0, 0, 0, 0))
     cmap_nvr.set_over('#4c0519')
     norm_nvr = mcolors.BoundaryNorm(nvr_bounds, cmap_nvr.N)
 
     im2 = ax2.pcolormesh(lon2d, lat2d, cyclic_nvr, cmap=cmap_nvr, norm=norm_nvr, shading="auto", transform=ccrs.PlateCarree(), zorder=3)
     med_nvr = float(np.nanmedian(nvr_vals))
-    nvr_method = nvr_da.attrs.get("nvr_method", "mse")
-
-    nvr_title_math = r"\sigma^2_{\mathrm{noise,mod}} / ((1-\mathrm{ACC}^2)\sigma^2_{\mathrm{obs}})" if nvr_method == "acc_varobs" else r"\sigma^2_{\mathrm{noise,mod}} / \mathrm{MSE}"
-    nvr_label = "Noise / ((1-ACC²)·Var_obs)" if nvr_method == "acc_varobs" else "Noise-to-MSE Variance Ratio"
 
     ax2.set_title(
-        rf"$\mathbf{{(b)\ Noise\ Variance\ Ratio}}\ ({nvr_title_math}) \mid \mathbf{{Spatial\ Median:\ {med_nvr:.2f}}}$"
-        "\n"
-        f"[ < {nvr_low:.2f}: Under-Dispersed  |  {nvr_low:.2f}–{nvr_high:.2f}: Calibrated (95% CI)  |  > {nvr_high:.2f}: Over-Dispersed ]",
-        fontsize=8.5, pad=6
+        rf"$\mathbf{{(b)\ Noise\ Variance\ Ratio}}\ ({nvr_math}) \mid \mathbf{{Spatial\ Median:\ {med_nvr:.2f}}}$"
+        f"\n{nvr_subtitle}",
+        fontsize=8.0, pad=6
     )
 
     cbar_ax2 = fig.add_axes([0.54, 0.08, 0.38, 0.025])
-    cbar2 = fig.colorbar(im2, cax=cbar_ax2, orientation="horizontal", ticks=nvr_bounds, extend="max", label=nvr_label)
+    cbar2 = fig.colorbar(im2, cax=cbar_ax2, orientation="horizontal", ticks=nvr_bounds, extend="max", label=nvr_cbar_label)
     cbar2.ax.tick_params(labelsize=8)
 
+    # --- Final Layout & Save ---
     _draw_manual_graticules(ax1)
     _draw_manual_graticules(ax2)
 
@@ -167,7 +187,6 @@ def plot_variance_diagnostics_map(
     os.makedirs(os.path.dirname(output_png), exist_ok=True)
     plt.savefig(output_png, dpi=150, bbox_inches="tight")
     plt.close()
-
 def create_acc_sfs_colormap_orig():
     """Exact 9-level ACC colormap used in NOAA SFSv1 verification diagnostics."""
     bounds = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]

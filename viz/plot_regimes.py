@@ -12,15 +12,17 @@ def select_regime_gridpoints(
     acc_da: xr.DataArray,
     rpot_da: xr.DataArray,
     skill_threshold: float = 0.6,
+    high_quantile: float = 85.0,
+    low_quantile: float = 15.0,
 ) -> dict:
     """
-    Selects 5 regime points targeting physical thresholds relative to 1.0 within
-    the skilled domain (ACC > skill_threshold OR r_pot > skill_threshold).
-    If a condition is unpopulated, returns None for that regime.
+    Selects 5 regime points targeting dynamic extremes (percentiles) relative to 1.0 
+    within the skilled domain (ACC > skill_threshold OR r_pot > skill_threshold).
+    Uses scale-invariant log-distance so SVR magnitude does not dominate NVR.
     """
     valid_mask = (
-        ~np.isnan(svr_da.values)
-        & ~np.isnan(nvr_da.values)
+        ~np.isnan(svr_da.values) & (svr_da.values > 1e-6)
+        & ~np.isnan(nvr_da.values) & (nvr_da.values > 1e-6)
         & ~np.isnan(acc_da.values)
         & ~np.isnan(rpot_da.values)
     )
@@ -33,36 +35,32 @@ def select_regime_gridpoints(
     lats = svr_da.lat.values
     lons = svr_da.lon.values
 
-    regimes = {
-        "Excessive Signal, Excessive Noise": {
-            "target": (2.0, 2.0),
-            "cond": (svr_vals > 1.0) & (nvr_vals > 1.0),
-        },
-        "Excessive Signal, Deficient Noise": {
-            "target": (2.0, 0.2),
-            "cond": (svr_vals > 1.0) & (nvr_vals < 1.0),
-        },
-        "Deficient Signal, Excessive Noise": {
-            "target": (0.2, 2.0),
-            "cond": (svr_vals < 1.0) & (nvr_vals > 1.0),
-        },
-        "Deficient Signal, Deficient Noise": {
-            "target": (0.2, 0.2),
-            "cond": (svr_vals < 1.0) & (nvr_vals < 1.0),
-        },
-    }
+    # Quadrant Definitions
+    quadrant_specs = [
+        ("Inflated Signal, Over-dispersed Noise", svr_vals > 1.0, nvr_vals > 1.0, high_quantile, high_quantile),
+        ("Inflated Signal, Under-dispersed Noise", svr_vals > 1.0, nvr_vals < 1.0, high_quantile, low_quantile),
+        ("Deficient Signal, Over-dispersed Noise", svr_vals < 1.0, nvr_vals > 1.0, low_quantile, high_quantile),
+        ("Deficient Signal, Under-dispersed Noise", svr_vals < 1.0, nvr_vals < 1.0, low_quantile, low_quantile),
+    ]
 
     selected_coords = {}
 
-    for name, spec in regimes.items():
-        target_s, target_n = spec["target"]
-        quadrant_mask = target_mask & spec["cond"]
+    for name, cond_s, cond_n, q_s, q_n in quadrant_specs:
+        quadrant_mask = target_mask & cond_s & cond_n
 
         if not np.any(quadrant_mask):
             logger.warning(f"No grid points met physical condition for '{name}'. Setting plot to blank.")
             selected_coords[name] = None
         else:
-            dist = np.sqrt((svr_vals - target_s) ** 2 + (nvr_vals - target_n) ** 2)
+            # Dynamically compute target based on quadrant percentiles
+            target_s = float(np.percentile(svr_vals[quadrant_mask], q_s))
+            target_n = float(np.percentile(nvr_vals[quadrant_mask], q_n))
+
+            # Scale-invariant log-distance to dynamic targets
+            dist = np.sqrt(
+                (np.log(np.maximum(svr_vals, 1e-6) / target_s)) ** 2
+                + (np.log(np.maximum(nvr_vals, 1e-6) / target_n)) ** 2
+            )
             dist[~quadrant_mask] = np.inf
 
             min_idx = np.unravel_index(np.argmin(dist), dist.shape)
@@ -71,15 +69,19 @@ def select_regime_gridpoints(
                 "lon": float(lons[min_idx[1]]),
             }
 
-    # Ideal Regime (Closest to SVR = 1.0 and NVR = 1.0)
+    # Calibrated Ideal Regime (Closest to SVR = 1.0 and NVR = 1.0)
+    ideal_key = "Calibrated Signal & Noise (SVR=1, NVR=1)"
     if not np.any(target_mask):
         logger.warning("No grid points met skill threshold for Ideal regime. Setting plot to blank.")
-        selected_coords["Ideal Signal & Noise (SVR=1, NVR=1)"] = None
+        selected_coords[ideal_key] = None
     else:
-        dist_ideal = np.sqrt((svr_vals - 1.0) ** 2 + (nvr_vals - 1.0) ** 2)
+        dist_ideal = np.sqrt(
+            (np.log(np.maximum(svr_vals, 1e-6) / 1.0)) ** 2
+            + (np.log(np.maximum(nvr_vals, 1e-6) / 1.0)) ** 2
+        )
         dist_ideal[~target_mask] = np.inf
         idx_ideal = np.unravel_index(np.argmin(dist_ideal), dist_ideal.shape)
-        selected_coords["Ideal Signal & Noise (SVR=1, NVR=1)"] = {
+        selected_coords[ideal_key] = {
             "lat": float(lats[idx_ideal[0]]),
             "lon": float(lons[idx_ideal[1]]),
         }
@@ -96,13 +98,20 @@ def plot_anomaly_time_series_regimes(
     rpot_da: xr.DataArray,
     rpc_da: xr.DataArray,
     skill_threshold: float = 0.6,
+    show_calibrated: bool = False,
     output_png: str = "figures/anomaly_timeseries_regimes.png",
 ):
     """
     Plots normalized anomaly time series at 5 physical regime points in a 3x2 grid layout.
-    The 4 extreme regimes occupy rows 1-2, and the 'Ideal' regime sits on a line by itself (row 3).
-    Unmet conditions render as a blank subplot labeled 'Condition Not Met'.
+    
+    Parameters:
+    -----------
+    show_calibrated : bool
+        If True, overlays the recalibrated ensemble mean (alpha * fbar) and noise spread (beta * sigma)
+        in blue alongside the raw forecast and observations.
     """
+    nvr_method = nvr_da.attrs.get("nvr_method", "mse")
+
     coords = select_regime_gridpoints(
         svr_da=svr_da,
         nvr_da=nvr_da,
@@ -113,7 +122,6 @@ def plot_anomaly_time_series_regimes(
 
     years = sfs_anom_da.year.values
 
-    # First Pass: Extract time series & compute global Y-axis bounds for valid points
     regime_data = []
     global_ymin = np.inf
     global_ymax = -np.inf
@@ -142,8 +150,19 @@ def plot_anomaly_time_series_regimes(
         ens_mean_norm = sfs_pt.mean(dim="member").values / norm_factor
         noise_std_t = np.std(sfs_norm, axis=1, ddof=1)
 
+        # Recalibration factors
+        alpha = 1.0 / np.sqrt(max(svr_val, 1e-4))
+        beta = 1.0 / np.sqrt(max(nvr_val, 1e-4))
+        ens_mean_cal = alpha * ens_mean_norm
+        noise_std_cal = beta * noise_std_t
+
+        # Y-bound accounting for raw vs. calibrated
         ymin_pt = min(np.min(sfs_norm), np.min(obs_norm), np.min(ens_mean_norm - noise_std_t))
         ymax_pt = max(np.max(sfs_norm), np.max(obs_norm), np.max(ens_mean_norm + noise_std_t))
+
+        if show_calibrated:
+            ymin_pt = min(ymin_pt, np.min(ens_mean_cal - noise_std_cal))
+            ymax_pt = max(ymax_pt, np.max(ens_mean_cal + noise_std_cal))
 
         global_ymin = min(global_ymin, ymin_pt)
         global_ymax = max(global_ymax, ymax_pt)
@@ -158,6 +177,10 @@ def plot_anomaly_time_series_regimes(
                 "sfs_norm": sfs_norm,
                 "ens_mean_norm": ens_mean_norm,
                 "noise_std_t": noise_std_t,
+                "ens_mean_cal": ens_mean_cal,
+                "noise_std_cal": noise_std_cal,
+                "alpha": alpha,
+                "beta": beta,
                 "svr_val": svr_val,
                 "nvr_val": nvr_val,
                 "acc_val": acc_val,
@@ -166,14 +189,13 @@ def plot_anomaly_time_series_regimes(
             }
         )
 
-    # Set default bounds if no condition was met across any regime
+    # Padding so top text box never collides with data
     if np.isinf(global_ymin) or np.isinf(global_ymax):
-        ylim_bounds = (-3.0, 3.0)
+        ylim_bounds = (-3.5, 3.5)
     else:
-        y_padding = (global_ymax - global_ymin) * 0.05
+        y_padding = (global_ymax - global_ymin) * 0.18
         ylim_bounds = (global_ymin - y_padding, global_ymax + y_padding)
 
-    # Second Pass: Plotting on 3x2 Grid
     fig, axes = plt.subplots(3, 2, figsize=(14, 13), sharex=True, sharey=True)
     axes_flat = axes.flatten()
 
@@ -197,47 +219,82 @@ def plot_anomaly_time_series_regimes(
         noise_std_t = data["noise_std_t"]
         obs_norm = data["obs_norm"]
 
-        # 1. Faint individual ensemble members
-        for m in range(sfs_norm.shape[1]):
+        if show_calibrated:
+            # 1. Raw Forecast (Subdued Crimson)
             ax.plot(
-                years, sfs_norm[:, m], color="lightgray", alpha=0.35, linewidth=0.6, zorder=1,
-                label="Ensemble Members" if m == 0 else ""
+                years, ens_mean_norm, color="crimson", linestyle="--", linewidth=1.5,
+                alpha=0.6, zorder=2, label="Raw Mean"
+            )
+            ax.fill_between(
+                years, ens_mean_norm - noise_std_t, ens_mean_norm + noise_std_t,
+                color="crimson", alpha=0.10, zorder=1, label=r"Raw $\pm 1\sigma$ Spread"
             )
 
-        # 2. Shaded \pm 1\sigma_{noise} Spread Band
-        ax.fill_between(
-            years,
-            ens_mean_norm - noise_std_t,
-            ens_mean_norm + noise_std_t,
-            color="crimson",
-            alpha=0.20,
-            zorder=2,
-            label=r"$\pm 1\sigma_{\mathrm{noise}}$ Spread",
-        )
+            # 2. Recalibrated Forecast (Prominent Blue)
+            ens_mean_cal = data["ens_mean_cal"]
+            noise_std_cal = data["noise_std_cal"]
+            alpha = data["alpha"]
+            beta = data["beta"]
 
-        # 3. Ensemble Mean & Observations
-        ax.plot(years, ens_mean_norm, color="crimson", linewidth=2.2, zorder=3, label="Ensemble Mean")
-        ax.plot(years, obs_norm, color="black", linewidth=2.0, linestyle="--", zorder=4, label="Observed")
+            ax.plot(
+                years, ens_mean_cal, color="#1e40af", linewidth=2.2, zorder=4,
+                label=rf"Cal. Mean ($\alpha={alpha:.2f}$)"
+            )
+            ax.fill_between(
+                years, ens_mean_cal - noise_std_cal, ens_mean_cal + noise_std_cal,
+                color="#3b82f6", alpha=0.25, zorder=3, label=rf"Cal. Spread ($\beta={beta:.2f}$)"
+            )
+        else:
+            # Standard View: Raw Members, Spread, and Mean
+            for m in range(sfs_norm.shape[1]):
+                ax.plot(
+                    years, sfs_norm[:, m], color="lightgray", alpha=0.35, linewidth=0.6, zorder=1,
+                    label="Ensemble Members" if m == 0 else ""
+                )
+            ax.fill_between(
+                years, ens_mean_norm - noise_std_t, ens_mean_norm + noise_std_t,
+                color="crimson", alpha=0.20, zorder=2, label=r"$\pm 1\sigma_{\mathrm{noise}}$ Spread"
+            )
+            ax.plot(years, ens_mean_norm, color="crimson", linewidth=2.2, zorder=3, label="Ensemble Mean")
+
+        # 3. Observed Time Series (Black Dashed)
+        ax.plot(years, obs_norm, color="black", linewidth=2.0, linestyle="--", zorder=5, label="Observed")
+
+        # Metric Text Box
+        if nvr_method == "acc_varobs":
+            svr_lbl = f"SVR (vs ACC²·Var_obs) = {data['svr_val']:.2f}"
+            nvr_lbl = f"NVR (vs (1-ACC²)·Var_obs) = {data['nvr_val']:.2f}"
+        else:
+            svr_lbl = f"SVR (vs Var_obs) = {data['svr_val']:.2f}"
+            nvr_lbl = f"NVR (vs MSE) = {data['nvr_val']:.2f}"
+
+        cal_info = f"\nα = {data['alpha']:.2f} | β = {data['beta']:.2f}" if show_calibrated else ""
 
         metrics_text = (
             f"Lat: {lat:.2f}°, Lon: {lon:.2f}°\n"
-            f"SVR = {data['svr_val']:.2f}\n"
-            f"NVR = {data['nvr_val']:.2f}\n"
+            f"{svr_lbl}\n"
+            f"{nvr_lbl}\n"
             f"ACC = {data['acc_val']:.2f}\n"
             rf"$r_{{\mathrm{{pot}}}}$ = {data['rpot_val']:.2f}" "\n"
             f"RPC = {data['rpc_val']:.2f}"
+            f"{cal_info}"
         )
         ax.text(
-            0.02, 0.95, metrics_text, transform=ax.transAxes,
-            fontsize=9, verticalalignment="top",
-            bbox=dict(boxstyle="round,pad=0.4", facecolor="white", alpha=0.85, edgecolor="gray")
+            0.02, 0.96, metrics_text, transform=ax.transAxes,
+            fontsize=8.0, verticalalignment="top",
+            bbox=dict(boxstyle="round,pad=0.4", facecolor="white", alpha=0.88, edgecolor="gray")
         )
 
         if i == 0:
-            ax.legend(loc="upper right", fontsize=8.5, framealpha=0.9)
+            ax.legend(loc="upper right", fontsize=8.0, framealpha=0.9)
 
-    # Hide unused 6th panel (Row 3, Column 2) so Ideal sits alone on Row 3
+    # Re-enable bottom X-axis labels on panel 4 (Row 2, Right)
+    axes[1, 1].tick_params(labelbottom=True)
     axes_flat[5].set_visible(False)
+
+    method_title_str = "ACC² · Var_obs Baseline" if nvr_method == "acc_varobs" else "MSE Baseline"
+    cal_title_str = " [Raw vs Recalibrated Overlay]" if show_calibrated else ""
+    fig.suptitle(f"Regime Time Series Diagnostics [{method_title_str}]{cal_title_str}", fontsize=13, fontweight="bold", y=0.995)
 
     plt.tight_layout()
     plt.savefig(output_png, dpi=300, bbox_inches="tight")

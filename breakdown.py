@@ -208,7 +208,9 @@ def run_variance_diagnostic_cli(
     )
 
     # 7) Plot 4-Regime Anomaly Time Series Subplots
-    ts_output_png = output_png.replace(".png", "_regimes_ts.png")
+    show_calibrated=True
+    ts_suffix = "_regimes_ts_recalibrated.png" if show_calibrated else "_regimes_ts.png"
+    ts_output_png = output_png.replace(".png", ts_suffix)
     logger.info(f"Plotting regime time series diagnostics to {ts_output_png}...")
     plot_anomaly_time_series_regimes(
         sfs_anom_da=canonicalize_lonlat(sfs_anom_da),
@@ -218,6 +220,7 @@ def run_variance_diagnostic_cli(
         acc_da=acc_da,
         rpot_da=rpot_da,
         rpc_da=rpc_da,
+        show_calibrated=show_calibrated,  # <--- ADDED
         output_png=ts_output_png,
     )
 
@@ -236,6 +239,7 @@ if __name__ == "__main__":
     parser.add_argument("--mse-eps", type=float, default=1e-12)
     parser.add_argument("--nvr-method", type=str, default="mse", choices=["mse", "acc_varobs"])
     parser.add_argument("--acc-eps", type=float, default=1e-12)
+    #parser.add_argument("--show-calibrated", action="store_true", help="Overlay recalibrated mean and spread in regime plots")
     parser.add_argument("--debug", action="store_true")
 
     args = parser.parse_args()
@@ -253,5 +257,6 @@ if __name__ == "__main__":
         mse_eps=args.mse_eps,
         nvr_method=args.nvr_method,
         acc_eps=args.acc_eps,
+    #    show_calibrated=args.show_calibrated,
         debug=args.debug,
     )
