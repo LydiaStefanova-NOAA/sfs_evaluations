@@ -1,18 +1,19 @@
 """
-Reliability Metric Calculation Module
+Targeted Reliability Metric Calculation Module
 
-Computes forecast probability vs. observed relative frequency for extreme events
-(e.g., upper-tercile events >67th percentile).
+Computes forecast probability vs. observed relative frequency for upper-tercile events
+(e.g., >67th percentile) across specific spatial domains (Niño 3.4 & High-Skill regions).
 
-Supports:
-- Model-relative quantile thresholding (preserves rank order & tail probabilities)
-  vs. absolute observation thresholding.
-- Targeted domain evaluation (Niño 3.4 region: 5°S–5°N, 170°W–120°W).
-- Skill-filtered domain evaluation (filtering grid points where ACC >= threshold).
+Features:
+- Auto-canonicalization of coordinates (lat: -90..90, lon: -180..180).
+- Protection against xarray quantile coordinate alignment mismatches.
+- Decoupled validity filtering (prevents calibration NaNs from wiping out raw forecasts).
+- Support for model-relative quantile thresholding to preserve rank order.
 """
 import logging
 import numpy as np
 import xarray as xr
+from preprocess.spatial_alignment import canonicalize_lonlat
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,7 @@ def _build_nino34_mask(da: xr.DataArray) -> xr.DataArray:
     lat_da = da[lat_name]
     lon_da = da[lon_name]
 
-    # Normalize longitudes to [-180, 180] regardless of input convention (0..360 vs -180..180)
+    # Universal longitude normalization to [-180, 180]
     lon_norm = xr.where(lon_da > 180, lon_da - 360, lon_da)
 
     lat_mask = (lat_da >= -5.0) & (lat_da <= 5.0)
@@ -40,11 +41,8 @@ def _build_nino34_mask(da: xr.DataArray) -> xr.DataArray:
     mask = lat_mask & lon_mask
     n_points = int(mask.sum())
     logger.info(f"Niño 3.4 spatial mask selected {n_points} grid cell(s).")
-    
-    if n_points == 0:
-        logger.warning("⚠️ Warning: Niño 3.4 mask selected 0 grid cells! Check lat/lon range of input dataset.")
-
     return mask
+
 
 def _compute_single_region_reliability(
     sfs_anom: xr.DataArray,
@@ -59,51 +57,32 @@ def _compute_single_region_reliability(
     member_dim: str = "member",
 ) -> dict:
     """
-    Core engine to compute reliability curve metrics over a masked spatial domain.
-
-    Parameters
-    ----------
-    sfs_anom : xr.DataArray
-        Raw model anomaly ensemble (year, member, lat, lon).
-    obs_anom : xr.DataArray
-        Observational anomaly field (year, lat, lon).
-    alpha_da : xr.DataArray
-        Signal scaling factor (alpha).
-    beta_da : xr.DataArray
-        Spread scaling factor (beta).
-    mask_da : xr.DataArray, optional
-        Boolean spatial mask. If provided, metrics are restricted to True grid cells.
-    quantile : float, default=0.67
-        Event threshold quantile (0.67 for upper tercile).
-    n_bins : int, default=5
-        Number of probability binning intervals between 0.0 and 1.0.
-    threshold_mode : {"model_relative", "obs_absolute"}, default="model_relative"
-        - "model_relative": Evaluates exceedance relative to each dataset's OWN quantile threshold.
-        - "obs_absolute": Evaluates exceedance directly against Q(Obs) in physical units.
+    Core engine to compute reliability curve metrics over a spatial domain.
     """
     n_members = sfs_anom.sizes[member_dim]
 
     # 1. Observed Event Threshold & Binary Indicator
-    obs_thresh = obs_anom.quantile(quantile, dim=year_dim)
+    obs_thresh = obs_anom.quantile(quantile, dim=year_dim, skipna=True).drop_vars("quantile", errors="ignore")
     obs_binary = obs_anom > obs_thresh
 
-    # 2. Construct Calibrated Ensemble Members
+    # 2. Construct Calibrated Ensemble Members with NaN protection
+    alpha_clean = alpha_da.fillna(0.0)
+    beta_clean = beta_da.fillna(1.0)
+
     ens_mean_raw = sfs_anom.mean(dim=member_dim, skipna=True)
     ens_pert_raw = sfs_anom - ens_mean_raw
-    sfs_cal = (alpha_da * ens_mean_raw) + (beta_da * ens_pert_raw)
+    sfs_cal = (alpha_clean * ens_mean_raw) + (beta_clean * ens_pert_raw)
 
-    # 3. Compute Forecast Probabilities Based on Selected Threshold Mode
+    # 3. Compute Forecast Probabilities (Stripping quantile coords to prevent xarray comparison NaNs)
     if threshold_mode == "model_relative":
-        # Compute threshold relative to each ensemble's own distribution across years and members
-        raw_thresh = sfs_anom.quantile(quantile, dim=[year_dim, member_dim])
-        cal_thresh = sfs_cal.quantile(quantile, dim=[year_dim, member_dim])
+        raw_thresh = sfs_anom.quantile(quantile, dim=[year_dim, member_dim], skipna=True).drop_vars("quantile", errors="ignore")
+        cal_thresh = sfs_cal.quantile(quantile, dim=[year_dim, member_dim], skipna=True).drop_vars("quantile", errors="ignore")
 
-        p_raw = (sfs_anom > raw_thresh).sum(dim=member_dim) / n_members
-        p_cal = (sfs_cal > cal_thresh).sum(dim=member_dim) / n_members
+        p_raw = (sfs_anom > raw_thresh).astype(float).mean(dim=member_dim, skipna=True)
+        p_cal = (sfs_cal > cal_thresh).astype(float).mean(dim=member_dim, skipna=True)
     elif threshold_mode == "obs_absolute":
-        # Direct physical threshold comparison
-        p_raw = (sfs_anom > obs_thresh).sum(dim=member_dim) / n_members
-        p_cal = (sfs_cal > obs_thresh).sum(dim=member_dim) / n_members
+        p_raw = (sfs_anom > obs_thresh).astype(float).mean(dim=member_dim, skipna=True)
+        p_cal = (sfs_cal > obs_thresh).astype(float).mean(dim=member_dim, skipna=True)
     else:
         raise ValueError(f"Invalid threshold_mode '{threshold_mode}'. Allowed: 'model_relative', 'obs_absolute'")
 
@@ -113,43 +92,55 @@ def _compute_single_region_reliability(
         p_raw = p_raw.where(mask_da)
         p_cal = p_cal.where(mask_da)
 
-    # Flatten arrays and drop NaNs
-    obs_vals = obs_binary.values.flatten()
-    raw_vals = p_raw.values.flatten()
-    cal_vals = p_cal.values.flatten()
+    # Flatten arrays
+    obs_flat = obs_binary.values.flatten()
+    raw_flat = p_raw.values.flatten()
+    cal_flat = p_cal.values.flatten()
 
-    valid = ~np.isnan(obs_vals) & ~np.isnan(raw_vals) & ~np.isnan(cal_vals)
-    obs_vals = obs_vals[valid]
-    raw_vals = raw_vals[valid]
-    cal_vals = cal_vals[valid]
+    # 5. Decoupled Validity Filtering (Prevents calibration NaNs from wiping out the raw model line)
+    valid_raw = ~np.isnan(obs_flat) & ~np.isnan(raw_flat)
+    valid_cal = ~np.isnan(obs_flat) & ~np.isnan(cal_flat)
 
-    # 5. Probability Binning into Reliability Histogram
+    obs_raw_vals, raw_vals = obs_flat[valid_raw], raw_flat[valid_raw]
+    obs_cal_vals, cal_vals = obs_flat[valid_cal], cal_flat[valid_cal]
+
     bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
     bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
 
     prob_pred_raw, prob_obs_raw, counts_raw = [], [], []
     prob_pred_cal, prob_obs_cal, counts_cal = [], [], []
 
+    # 6. Probability Binning Loop
     for i in range(n_bins):
         low, high = bin_edges[i], bin_edges[i + 1]
 
-        # Raw binning
-        idx_r = (raw_vals >= low) & (raw_vals < high if i < n_bins - 1 else raw_vals <= high)
-        if np.sum(idx_r) > 0:
-            prob_pred_raw.append(np.mean(raw_vals[idx_r]))
-            prob_obs_raw.append(np.mean(obs_vals[idx_r]))
-            counts_raw.append(np.sum(idx_r))
+        # Raw model binning
+        if len(raw_vals) > 0:
+            idx_r = (raw_vals >= low) & (raw_vals < high if i < n_bins - 1 else raw_vals <= high)
+            if np.sum(idx_r) > 0:
+                prob_pred_raw.append(np.mean(raw_vals[idx_r]))
+                prob_obs_raw.append(np.mean(obs_raw_vals[idx_r]))
+                counts_raw.append(np.sum(idx_r))
+            else:
+                prob_pred_raw.append(bin_centers[i])
+                prob_obs_raw.append(np.nan)
+                counts_raw.append(0)
         else:
             prob_pred_raw.append(bin_centers[i])
             prob_obs_raw.append(np.nan)
             counts_raw.append(0)
 
-        # Calibrated binning
-        idx_c = (cal_vals >= low) & (cal_vals < high if i < n_bins - 1 else cal_vals <= high)
-        if np.sum(idx_c) > 0:
-            prob_pred_cal.append(np.mean(cal_vals[idx_c]))
-            prob_obs_cal.append(np.mean(obs_vals[idx_c]))
-            counts_cal.append(np.sum(idx_c))
+        # Calibrated model binning
+        if len(cal_vals) > 0:
+            idx_c = (cal_vals >= low) & (cal_vals < high if i < n_bins - 1 else cal_vals <= high)
+            if np.sum(idx_c) > 0:
+                prob_pred_cal.append(np.mean(cal_vals[idx_c]))
+                prob_obs_cal.append(np.mean(obs_cal_vals[idx_c]))
+                counts_cal.append(np.sum(idx_c))
+            else:
+                prob_pred_cal.append(bin_centers[i])
+                prob_obs_cal.append(np.nan)
+                counts_cal.append(0)
         else:
             prob_pred_cal.append(bin_centers[i])
             prob_obs_cal.append(np.nan)
@@ -163,6 +154,7 @@ def _compute_single_region_reliability(
         "prob_pred_cal": np.array(prob_pred_cal),
         "prob_obs_cal": np.array(prob_obs_cal),
         "counts_cal": np.array(counts_cal),
+        "valid_count": max(len(raw_vals), len(cal_vals)),
     }
 
 
@@ -182,9 +174,15 @@ def compute_nino34_reliability_curves(
     - Panel (a): Niño 3.4 Region (5°S–5°N, 170°W–120°W)
     - Panel (b): High-Skill Domain (ACC >= min_acc_threshold) or Global Baseline
     """
-    logger.info(
-        f"Computing Targeted Reliability Curves (q={quantile:.2f}, mode='{threshold_mode}')..."
-    )
+    logger.info(f"Computing Targeted Reliability Curves (q={quantile:.2f}, mode='{threshold_mode}')...")
+
+    # Force canonical coordinates across all DataArrays to eliminate indexing mismatches
+    sfs_anom = canonicalize_lonlat(sfs_anom)
+    obs_anom = canonicalize_lonlat(obs_anom)
+    alpha_da = canonicalize_lonlat(alpha_da)
+    beta_da = canonicalize_lonlat(beta_da)
+    if acc_da is not None:
+        acc_da = canonicalize_lonlat(acc_da)
 
     # 1. Panel (a): Niño 3.4 Mask
     nino34_mask = _build_nino34_mask(sfs_anom)
@@ -199,7 +197,7 @@ def compute_nino34_reliability_curves(
         threshold_mode=threshold_mode,
     )
 
-    # 2. Panel (b): High Skill Mask (ACC >= 0.3) if ACC is supplied, else Global
+    # 2. Panel (b): High-Skill Domain (ACC >= min_acc_threshold)
     if acc_da is not None:
         skill_mask = acc_da >= min_acc_threshold
         second_label = f"High-Skill Domain (ACC ≥ {min_acc_threshold:.1f})"

@@ -276,7 +276,8 @@ def run_variance_diagnostic_cli(
         from viz.spatial_verification import plot_scaling_factors_map, plot_msess_map
         from metrics.ser import compute_ser_before_after
         from viz.spatial_ser import plot_ser_comparison_map
-        from metrics.reliability import compute_reliability_curve
+        #from metrics.reliability import compute_reliability_curve
+        from metrics.reliability import compute_nino34_reliability_curves
         from viz.plot_reliability import plot_reliability_diagram
 
         logger.info("Step 8: Generating Section 5 verification & recalibration plots...")
@@ -322,24 +323,20 @@ def run_variance_diagnostic_cli(
             output_png=ser_png,
         )
 
-        # 8d) Extreme Event Reliability Diagram (Model-Relative Quantiles)
-        from metrics.reliability import compute_nino34_reliability_curves
-        from viz.plot_reliability import plot_reliability_diagram
-
-        rel_dict = compute_nino34_reliability_curves(
-            sfs_anom=sfs_anom_da,
-            obs_anom=obs_anom_da,
-            alpha_da=alpha_da,
-            beta_da=beta_da,
-            acc_da=acc_da,
-            quantile=0.67,
-            n_bins=5,
-            min_acc_threshold=0.3,
-            threshold_mode="model_relative",  # <--- ADD THIS PARAMETER
-        )
+        # Step 8d in breakdown.py
         rel_png = f"{verif_prefix}_reliability_tercile.png"
         plot_reliability_diagram(
-            rel_dict=rel_dict,
+            rel_dict=compute_nino34_reliability_curves(
+                sfs_anom=canonicalize_lonlat(sfs_anom_da),
+                obs_anom=canonicalize_lonlat(obs_anom_da),
+                alpha_da=canonicalize_lonlat(alpha_da),
+                beta_da=canonicalize_lonlat(beta_da),
+                acc_da=canonicalize_lonlat(acc_da),
+                quantile=0.67,
+                n_bins=5,
+                min_acc_threshold=0.3,
+                threshold_mode="model_relative",
+            ),
             title=make_title("Upper-Tercile Event Reliability (>67th Percentile)"),
             output_png=rel_png,
         )
