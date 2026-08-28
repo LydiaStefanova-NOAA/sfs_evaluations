@@ -3,6 +3,7 @@ Spatial Diagnostic Script: Unpack High SNR into Signal Variance vs. Noise Varian
 Supports Atmospheric (atm), Oceanic (ocn), and Sea Ice (ice) variables.
 """
 import argparse
+import calendar
 import logging
 import warnings
 import numpy as np
@@ -28,14 +29,12 @@ from preprocess.spatial_alignment import (
     standardize_year_dim,
     align_obs_to_sfs_grid,
     select_common_eval_years,
-    grid_report,
-    nan_report,
 )
 from preprocess.climatology import compute_climatology, _linear_detrend
 from metrics.acc import compute_acc
 from metrics.snr import compute_snr, compute_potential_skill, compute_rpc
 from metrics.compute_variance_diagnostic import compute_variance_ratios
-from viz.spatial import plot_variance_diagnostics_map
+from viz.spatial import plot_variance_diagnostics_map, plot_skill_predictability_trio
 from viz.plot_regimes import plot_anomaly_time_series_regimes
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
@@ -56,6 +55,37 @@ DEFAULT_VARS = {"atm": "TMP2m", "ice": "aice_h", "ocn": "SSH"}
 clim_years = (1991, 2020)
 
 
+def format_plot_title(
+    component: str,
+    var_name: str,
+    init_val: int | str,
+    lead_str: str | int,
+    start_year: int | str,
+    end_year: int | str,
+    label: str,
+) -> str:
+    """Standardized title header generator: COMP: SFS VAR Init 05 Lead 1-3 (START-END) | LABEL"""
+    init_num = None
+    if isinstance(init_val, int):
+        init_num = init_val
+    else:
+        clean_init = str(init_val).strip().lower().replace("init", "").strip()
+        if clean_init.isdigit():
+            init_num = int(clean_init)
+        else:
+            month_abbrs = [m.lower() for m in calendar.month_abbr]
+            month_names = [m.lower() for m in calendar.month_name]
+            if clean_init[:3] in month_abbrs:
+                init_num = month_abbrs.index(clean_init[:3])
+            elif clean_init in month_names:
+                init_num = month_names.index(clean_init)
+
+    init_fmt = f"Init {init_num:02d}" if init_num is not None else f"Init {init_val}"
+    lead_fmt = str(lead_str) if str(lead_str).lower().startswith("lead") else f"Lead {lead_str}"
+
+    return f"{component.upper()}: SFS {var_name} {init_fmt} {lead_fmt} ({start_year}-{end_year}) | {label}"
+
+
 def run_variance_diagnostic_cli(
     component: str = "ocn",
     var_name: str = None,
@@ -68,8 +98,9 @@ def run_variance_diagnostic_cli(
     leads_override: list[int] = None,
     varobs_eps: float = 1e-12,
     mse_eps: float = 1e-12,
-    nvr_method: str = "mse",
+    nvr_method: str = "acc_varobs",
     acc_eps: float = 1e-12,
+    show_calibrated: bool = True,
     debug: bool = False,
 ):
     comp = component.lower()
@@ -82,12 +113,12 @@ def run_variance_diagnostic_cli(
     if var_name not in DOMAIN_VARS[comp]:
         raise ValueError(f"Variable '{var_name}' not supported for domain '{comp}'. Allowed: {DOMAIN_VARS[comp]}")
 
-    # Resolve leads
+    # Resolve leads and lead string representation
     if leads_override is not None and len(leads_override) > 0:
         leads = [int(L) for L in leads_override]
         target_months = leads_to_target_months(init_month, leads)
         season_str = get_season_name(target_months)
-        label = f"Init {init_month:02d} | Leads {leads[0]}-{leads[-1]}" if len(leads) > 1 else f"Init {init_month:02d} | Lead {leads[0]}"
+        lead_str = f"{leads[0]}-{leads[-1]}" if len(leads) > 1 else f"{leads[0]}"
     else:
         season_str = get_season_name(target_months)
         resolved_inits = resolve_target_season_leads(target_months)
@@ -95,19 +126,20 @@ def run_variance_diagnostic_cli(
         if init_info is None:
             available_inits = [item[0] for item in resolved_inits]
             raise ValueError(f"Init month {init_month:02d} cannot target season {season_str}. Available: {available_inits}")
-        _, leads, label = init_info
+        _, leads, _ = init_info
+        lead_str = f"{leads[0]}-{leads[-1]}" if len(leads) > 1 else f"{leads[0]}"
 
     domain_label = DOMAIN_LABEL_MAP[comp]
     obs_label = OBS_NAME_MAP[comp]
     logger.info(f"=== Starting {season_str} {domain_label} SNR Variance Breakdown Diagnostic ({var_name}) ===")
     logger.info(f"NVR method: {nvr_method}")
 
-    # 1) SFS seasonal field
+    # 1) Load SFS seasonal field
     ds_sfs_raw = get_sfs_data(init_month=init_month, domain=comp, requested_vars=[var_name])
     ds_sfs = PREPROCESS_MAP[comp](ds_sfs_raw)
     sfs_season_da = ds_sfs[var_name].sel(lead=leads).mean(dim="lead", skipna=True)
 
-    # 2) OBS seasonal field
+    # 2) Load OBS seasonal field
     ds_obs_raw = OBS_DATA_MAP[comp](requested_vars=[var_name])
     obs_season_da = seasonal_mean_obs_by_init_and_leads(
         ds_obs_raw[var_name],
@@ -119,7 +151,7 @@ def run_variance_diagnostic_cli(
         require_complete=True,
     )
 
-    # 3) Standardize + Canonicalize + Year alignment
+    # 3) Standardize, Canonicalize, Align coordinates
     sfs_season_da = canonicalize_lonlat(standardize_year_dim(sfs_season_da))
     obs_season_da = canonicalize_lonlat(standardize_year_dim(obs_season_da))
 
@@ -144,29 +176,34 @@ def run_variance_diagnostic_cli(
             f"figures/{comp}_{season_str.lower()}_{var_name.lower()}_variance_breakdown_"
             f"init{init_month:02d}_{actual_start}-{actual_end}{detrend_str}{method_str}.png"
         )
+
+    # Master title generator closure
+    def make_title(label: str) -> str:
+        return format_plot_title(
+            component=comp,
+            var_name=var_name,
+            init_val=init_month,
+            lead_str=lead_str,
+            start_year=actual_start,
+            end_year=actual_end,
+            label=label,
+        )
+
     # 5) Compute Anomalies & Metrics
     logger.info(f"Computing Variance Ratios (SVR & NVR) against {obs_label}...")
 
-    # 5.1) Compute raw anomalies relative to climatology
     sfs_anom_da = sfs_season_da - sfs_clim_da
     obs_anom_da = obs_season_da - obs_clim_da
 
-    # 5.2) Apply Ensemble-Mean Linear Detrending
     if detrend:
         logger.info("Applying ensemble-mean linear detrending...")
-        ens_mean_anom = (
-            sfs_anom_da.mean(dim="member", skipna=True)
-            if "member" in sfs_anom_da.dims
-            else sfs_anom_da
-        )
+        ens_mean_anom = sfs_anom_da.mean(dim="member", skipna=True) if "member" in sfs_anom_da.dims else sfs_anom_da
         ens_mean_detrended = _linear_detrend(ens_mean_anom, dim="year")
         sfs_trend = ens_mean_anom - ens_mean_detrended
 
-        # Subtract forced trend from all members (preserves internal spread)
         sfs_anom_da = sfs_anom_da - sfs_trend
         obs_anom_da = _linear_detrend(obs_anom_da, dim="year")
 
-    # 5.3) Compute ACC using full fields and climatologies
     acc_da = compute_acc(
         sfs_da=sfs_season_da,
         obs_da=obs_season_da,
@@ -175,7 +212,6 @@ def run_variance_diagnostic_cli(
         detrend=detrend,
     )
 
-    # 5.4) Primary Metrics Pipeline
     svr_da, nvr_da = compute_variance_ratios(
         sfs_anom=sfs_anom_da,
         obs_anom=obs_anom_da,
@@ -184,31 +220,40 @@ def run_variance_diagnostic_cli(
         mse_eps=mse_eps,
         nvr_method=nvr_method,
         acc_eps=acc_eps,
-        detrend=detrend,  # Signals ddof=2 when data is detrended
+        detrend=detrend,
     )
 
     snr_da = compute_snr(sfs_season_da, year_dim="year", member_dim="member", detrend=detrend)
     rpot_da = compute_potential_skill(snr_da)
     rpc_da = compute_rpc(acc_da, rpot_da)
 
-    # 6) Plot Diagnostics Map
-    title_str = (
-        f"{component.upper()}: SFS {var_name} {season_str} Signal vs. Noise Variance "
-        f"({actual_start}–{actual_end}) | {label}"
+    # 6) Plot Diagnostics Maps & Plots
+    
+    # Step 6a: Skill & Predictability Trio Map
+    trio_png = output_png.replace(".png", "_trio.png")
+    logger.info(f"Plotting Skill & Predictability Trio map to {trio_png}...")
+    plot_skill_predictability_trio(
+        acc_da=canonicalize_lonlat(acc_da),
+        rpot_da=canonicalize_lonlat(rpot_da),
+        rpc_da=canonicalize_lonlat(rpc_da),
+        main_title=make_title("Skill & Predictability Trio (ACC & RPC)"),
+        output_png=trio_png,
     )
+
+    # Step 6b: Variance Diagnostics Map
     logger.info("Plotting variance diagnostics spatial map...")
+    n_members_val = sfs_season_da.sizes.get("member", 30)
     plot_variance_diagnostics_map(
-        svr_da=svr_da,
-        nvr_da=nvr_da,
+        svr_da=canonicalize_lonlat(svr_da),
+        nvr_da=canonicalize_lonlat(nvr_da),
         n_years=len(eval_years),
-        n_members=int(sfs_season_da.member.size),
+        n_members=int(n_members_val),
         detrend=detrend,
-        title_str=title_str,
+        title_str=make_title("SNR Variance Breakdown (SVR & NVR)"),
         output_png=output_png,
     )
 
-    # 7) Plot 4-Regime Anomaly Time Series Subplots
-    show_calibrated=True
+    # Step 7: 5-Regime Anomaly Time Series Subplots
     ts_suffix = "_regimes_ts_recalibrated.png" if show_calibrated else "_regimes_ts.png"
     ts_output_png = output_png.replace(".png", ts_suffix)
     logger.info(f"Plotting regime time series diagnostics to {ts_output_png}...")
@@ -220,11 +265,84 @@ def run_variance_diagnostic_cli(
         acc_da=acc_da,
         rpot_da=rpot_da,
         rpc_da=rpc_da,
-        show_calibrated=show_calibrated,  # <--- ADDED
+        show_calibrated=show_calibrated,
+        title=make_title("5-Regime Diagnostic Time Series Overlays"),
         output_png=ts_output_png,
     )
 
+    # Step 8: Verification & Recalibration Suite (acc_varobs mode only)
+    if nvr_method == "acc_varobs":
+        from metrics.verification import compute_recalibration_metrics
+        from viz.spatial_verification import plot_scaling_factors_map, plot_msess_map
+        from metrics.ser import compute_ser_before_after
+        from viz.spatial_ser import plot_ser_comparison_map
+        from metrics.reliability import compute_reliability_curves
+        from viz.plot_reliability import plot_reliability_diagram
 
+        logger.info("Step 8: Generating Section 5 verification & recalibration plots...")
+        alpha_da, beta_da, pct_mse_reduction_da = compute_recalibration_metrics(
+            sfs_anom=sfs_anom_da,
+            obs_anom=obs_anom_da,
+            svr_da=svr_da,
+            nvr_da=nvr_da,
+            acc_da=acc_da,
+        )
+
+        verif_prefix = output_png.replace(".png", "_verif")
+
+        # 8a) Scaling Factors Map (alpha, beta)
+        scaling_png = f"{verif_prefix}_scaling_factors.png"
+        plot_scaling_factors_map(
+            alpha_da=canonicalize_lonlat(alpha_da),
+            beta_da=canonicalize_lonlat(beta_da),
+            title=make_title("Calibration Scaling Factors (α & β)"),
+            output_png=scaling_png,
+        )
+
+        # 8b) Skill Payoff Map (MSESS)
+        msess_png = f"{verif_prefix}_msess.png"
+        plot_msess_map(
+            pct_mse_reduction_da=canonicalize_lonlat(pct_mse_reduction_da),
+            title=make_title("Global Forecast Skill Payoff (MSESS)"),
+            output_png=msess_png,
+        )
+
+        # 8c) SER Before/After Comparison Map
+        ser_raw, ser_cal = compute_ser_before_after(
+            sfs_anom=sfs_anom_da,
+            obs_anom=obs_anom_da,
+            alpha_da=alpha_da,
+            beta_da=beta_da,
+        )
+        ser_png = f"{verif_prefix}_ser_comparison.png"
+        plot_ser_comparison_map(
+            ser_raw_da=canonicalize_lonlat(ser_raw),
+            ser_cal_da=canonicalize_lonlat(ser_cal),
+            title=make_title("Spread-to-Error Ratio (SER)"),
+            output_png=ser_png,
+        )
+
+        # 8d) Extreme Event Reliability Diagram (Model-Relative Quantiles)
+        from metrics.reliability import compute_nino34_reliability_curves
+        from viz.plot_reliability import plot_reliability_diagram
+
+        rel_dict = compute_nino34_reliability_curves(
+            sfs_anom=sfs_anom_da,
+            obs_anom=obs_anom_da,
+            alpha_da=alpha_da,
+            beta_da=beta_da,
+            acc_da=acc_da,
+            quantile=0.67,
+            n_bins=5,
+            min_acc_threshold=0.3,
+            threshold_mode="model_relative",  # <--- ADD THIS PARAMETER
+        )
+        rel_png = f"{verif_prefix}_reliability_tercile.png"
+        plot_reliability_diagram(
+            rel_dict=rel_dict,
+            title=make_title("Upper-Tercile Event Reliability (>67th Percentile)"),
+            output_png=rel_png,
+        )
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Deconstruct SNR into Signal Variance and Noise Variance Ratios")
     parser.add_argument("--component", "-c", type=str, default="ocn", choices=["atm", "ice", "ocn"])
@@ -237,9 +355,9 @@ if __name__ == "__main__":
     parser.add_argument("--no-detrend", action="store_true")
     parser.add_argument("--varobs-eps", type=float, default=1e-12)
     parser.add_argument("--mse-eps", type=float, default=1e-12)
-    parser.add_argument("--nvr-method", type=str, default="mse", choices=["mse", "acc_varobs"])
+    parser.add_argument("--nvr-method", type=str, default="acc_varobs", choices=["mse", "acc_varobs"])
     parser.add_argument("--acc-eps", type=float, default=1e-12)
-    #parser.add_argument("--show-calibrated", action="store_true", help="Overlay recalibrated mean and spread in regime plots")
+    parser.add_argument("--no-show-calibrated", action="store_true", help="Disable recalibrated mean and spread overlay in regime plots")
     parser.add_argument("--debug", action="store_true")
 
     args = parser.parse_args()
@@ -257,6 +375,6 @@ if __name__ == "__main__":
         mse_eps=args.mse_eps,
         nvr_method=args.nvr_method,
         acc_eps=args.acc_eps,
-    #    show_calibrated=args.show_calibrated,
+        show_calibrated=not args.no_show_calibrated,
         debug=args.debug,
     )

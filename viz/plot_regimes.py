@@ -99,6 +99,7 @@ def plot_anomaly_time_series_regimes(
     rpc_da: xr.DataArray,
     skill_threshold: float = 0.6,
     show_calibrated: bool = False,
+    title: str = "",  # <--- ADD THIS PARAMETER
     output_png: str = "figures/anomaly_timeseries_regimes.png",
 ):
     """
@@ -294,7 +295,8 @@ def plot_anomaly_time_series_regimes(
 
     method_title_str = "ACC² · Var_obs Baseline" if nvr_method == "acc_varobs" else "MSE Baseline"
     cal_title_str = " [Raw vs Recalibrated Overlay]" if show_calibrated else ""
-    fig.suptitle(f"Regime Time Series Diagnostics [{method_title_str}]{cal_title_str}", fontsize=13, fontweight="bold", y=0.995)
+    main_title = title if title else f"Regime Time Series Diagnostics [{method_title_str}]{cal_title_str}"
+    fig.suptitle(main_title, fontsize=12, fontweight="bold", y=0.995)
 
     plt.tight_layout()
     plt.savefig(output_png, dpi=300, bbox_inches="tight")
