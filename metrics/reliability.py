@@ -1,14 +1,13 @@
 """
 Targeted Reliability Metric Calculation Module
 
-Computes forecast probability vs. observed relative frequency for upper-tercile events
-(e.g., >67th percentile) across specific spatial domains (Niño 3.4 & High-Skill regions).
+Computes forecast probability vs. observed relative frequency for upper-quantile events
+across specific spatial domains (Niño 3.4 & High-Skill regions).
 
-Features:
-- Auto-canonicalization of coordinates (lat: -90..90, lon: -180..180).
-- Protection against xarray quantile coordinate alignment mismatches.
-- Decoupled validity filtering (prevents calibration NaNs from wiping out raw forecasts).
-- Support for model-relative quantile thresholding to preserve rank order.
+Fixes:
+- Safe dimension transposition to ('year', 'lat', 'lon') using dynamic ordering before flattening.
+- Strips scalar coordinate metadata tags (e.g. 'quantile') to prevent xarray comparison NaNs.
+- Pure NumPy spatial mask indexing after explicit xarray alignment.
 """
 import logging
 import numpy as np
@@ -18,11 +17,26 @@ from preprocess.spatial_alignment import canonicalize_lonlat
 logger = logging.getLogger(__name__)
 
 
+def _clean_da(da: xr.DataArray) -> xr.DataArray:
+    """Strips extraneous non-dimensional scalar coordinates that break xarray comparison math."""
+    if da is None:
+        return None
+    drop_coords = [c for c in da.coords if c not in da.dims and c not in ["year", "lat", "lon", "latitude", "longitude"]]
+    if drop_coords:
+        da = da.drop_vars(drop_coords, errors="ignore")
+    return da
+
+
+def _transpose_spatial(da: xr.DataArray, target_dims: list = None) -> xr.DataArray:
+    """Safely transposes DataArray to preferred dimension order without kwarg errors."""
+    if target_dims is None:
+        target_dims = ["year", "lat", "lon"]
+    existing = [d for d in target_dims if d in da.dims] + [d for d in da.dims if d not in target_dims]
+    return da.transpose(*existing)
+
+
 def _build_nino34_mask(da: xr.DataArray) -> xr.DataArray:
-    """
-    Creates a boolean spatial mask for the Niño 3.4 region (5°S–5°N, 170°W–120°W).
-    Universally normalizes longitudes to [-180, 180] space.
-    """
+    """Creates a boolean spatial mask for Niño 3.4 (5°S–5°N, 170°W–120°W) in [-180, 180] space."""
     lat_name = next((c for c in ["lat", "latitude"] if c in da.coords or c in da.dims), None)
     lon_name = next((c for c in ["lon", "longitude"] if c in da.coords or c in da.dims), None)
 
@@ -32,15 +46,16 @@ def _build_nino34_mask(da: xr.DataArray) -> xr.DataArray:
     lat_da = da[lat_name]
     lon_da = da[lon_name]
 
-    # Universal longitude normalization to [-180, 180]
     lon_norm = xr.where(lon_da > 180, lon_da - 360, lon_da)
-
     lat_mask = (lat_da >= -5.0) & (lat_da <= 5.0)
     lon_mask = (lon_norm >= -170.0) & (lon_norm <= -120.0)
 
-    mask = lat_mask & lon_mask
-    n_points = int(mask.sum())
-    logger.info(f"Niño 3.4 spatial mask selected {n_points} grid cell(s).")
+    mask = (lat_mask & lon_mask)
+    drop_c = [c for c in mask.coords if c not in mask.dims]
+    if drop_c:
+        mask = mask.drop_vars(drop_c, errors="ignore")
+
+    logger.info(f"Niño 3.4 spatial mask selected {int(mask.sum())} grid cell(s).")
     return mask
 
 
@@ -56,16 +71,19 @@ def _compute_single_region_reliability(
     year_dim: str = "year",
     member_dim: str = "member",
 ) -> dict:
-    """
-    Core engine to compute reliability curve metrics over a spatial domain.
-    """
+    # 0. Clean extra coordinate clutter
+    sfs_anom = _clean_da(sfs_anom)
+    obs_anom = _clean_da(obs_anom)
+    alpha_da = _clean_da(alpha_da)
+    beta_da = _clean_da(beta_da)
+
     n_members = sfs_anom.sizes[member_dim]
 
     # 1. Observed Event Threshold & Binary Indicator
-    obs_thresh = obs_anom.quantile(quantile, dim=year_dim, skipna=True).drop_vars("quantile", errors="ignore")
-    obs_binary = obs_anom > obs_thresh
+    obs_thresh = _clean_da(obs_anom.quantile(quantile, dim=year_dim, skipna=True))
+    obs_binary = _transpose_spatial(obs_anom > obs_thresh, [year_dim, "lat", "lon"])
 
-    # 2. Construct Calibrated Ensemble Members with NaN protection
+    # 2. Construct Calibrated Ensemble Members
     alpha_clean = alpha_da.fillna(0.0)
     beta_clean = beta_da.fillna(1.0)
 
@@ -73,10 +91,10 @@ def _compute_single_region_reliability(
     ens_pert_raw = sfs_anom - ens_mean_raw
     sfs_cal = (alpha_clean * ens_mean_raw) + (beta_clean * ens_pert_raw)
 
-    # 3. Compute Forecast Probabilities (Stripping quantile coords to prevent xarray comparison NaNs)
+    # 3. Compute Forecast Probabilities
     if threshold_mode == "model_relative":
-        raw_thresh = sfs_anom.quantile(quantile, dim=[year_dim, member_dim], skipna=True).drop_vars("quantile", errors="ignore")
-        cal_thresh = sfs_cal.quantile(quantile, dim=[year_dim, member_dim], skipna=True).drop_vars("quantile", errors="ignore")
+        raw_thresh = _clean_da(sfs_anom.quantile(quantile, dim=[year_dim, member_dim], skipna=True))
+        cal_thresh = _clean_da(sfs_cal.quantile(quantile, dim=[year_dim, member_dim], skipna=True))
 
         p_raw = (sfs_anom > raw_thresh).astype(float).mean(dim=member_dim, skipna=True)
         p_cal = (sfs_cal > cal_thresh).astype(float).mean(dim=member_dim, skipna=True)
@@ -86,23 +104,30 @@ def _compute_single_region_reliability(
     else:
         raise ValueError(f"Invalid threshold_mode '{threshold_mode}'. Allowed: 'model_relative', 'obs_absolute'")
 
-    # 4. Apply Spatial Mask if provided
-    if mask_da is not None:
-        obs_binary = obs_binary.where(mask_da)
-        p_raw = p_raw.where(mask_da)
-        p_cal = p_cal.where(mask_da)
+    # Force identical dimension ordering ('year', 'lat', 'lon') across all 3D probability maps
+    p_raw = _transpose_spatial(p_raw, [year_dim, "lat", "lon"])
+    p_cal = _transpose_spatial(p_cal, [year_dim, "lat", "lon"])
 
-    # Flatten arrays
+    # 4. Apply Spatial Mask using NumPy values matching the 2D spatial footprint
+    if mask_da is not None:
+        mask_2d = _transpose_spatial(mask_da, ["lat", "lon"]).values
+        obs_binary = obs_binary.where(mask_2d)
+        p_raw = p_raw.where(mask_2d)
+        p_cal = p_cal.where(mask_2d)
+
+    # Flatten arrays (guaranteed to share exact same index order)
     obs_flat = obs_binary.values.flatten()
     raw_flat = p_raw.values.flatten()
     cal_flat = p_cal.values.flatten()
 
-    # 5. Decoupled Validity Filtering (Prevents calibration NaNs from wiping out the raw model line)
+    # 5. Decoupled Validity Filtering
     valid_raw = ~np.isnan(obs_flat) & ~np.isnan(raw_flat)
     valid_cal = ~np.isnan(obs_flat) & ~np.isnan(cal_flat)
 
     obs_raw_vals, raw_vals = obs_flat[valid_raw], raw_flat[valid_raw]
     obs_cal_vals, cal_vals = obs_flat[valid_cal], cal_flat[valid_cal]
+
+    logger.info(f"Reliability samples extracted -> Raw: {len(raw_vals)} | Calibrated: {len(cal_vals)}")
 
     bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
     bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
@@ -110,7 +135,7 @@ def _compute_single_region_reliability(
     prob_pred_raw, prob_obs_raw, counts_raw = [], [], []
     prob_pred_cal, prob_obs_cal, counts_cal = [], [], []
 
-    # 6. Probability Binning Loop
+    # 6. Binning Loop
     for i in range(n_bins):
         low, high = bin_edges[i], bin_edges[i + 1]
 
@@ -169,14 +194,8 @@ def compute_nino34_reliability_curves(
     min_acc_threshold: float = 0.3,
     threshold_mode: str = "model_relative",
 ) -> dict:
-    """
-    Computes reliability curves for a 2-panel comparison:
-    - Panel (a): Niño 3.4 Region (5°S–5°N, 170°W–120°W)
-    - Panel (b): High-Skill Domain (ACC >= min_acc_threshold) or Global Baseline
-    """
     logger.info(f"Computing Targeted Reliability Curves (q={quantile:.2f}, mode='{threshold_mode}')...")
 
-    # Force canonical coordinates across all DataArrays to eliminate indexing mismatches
     sfs_anom = canonicalize_lonlat(sfs_anom)
     obs_anom = canonicalize_lonlat(obs_anom)
     alpha_da = canonicalize_lonlat(alpha_da)
@@ -233,9 +252,6 @@ def compute_reliability_curve(
     n_bins: int = 5,
     threshold_mode: str = "model_relative",
 ) -> dict:
-    """
-    Backward-compatible single-domain (global) reliability curve entry point.
-    """
     return _compute_single_region_reliability(
         sfs_anom=sfs_anom,
         obs_anom=obs_anom,
