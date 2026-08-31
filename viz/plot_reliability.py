@@ -1,5 +1,5 @@
 """
-Targeted Reliability Diagram Plotting Module (Niño 3.4 vs. High-Skill/Global)
+Targeted Reliability Diagram Plotting Module (Annotated BSS, No-Skill Region Shading & Linear Scale)
 """
 import os
 import logging
@@ -12,19 +12,13 @@ logger = logging.getLogger(__name__)
 def plot_reliability_diagram(
     rel_dict: dict,
     title: str = "",
-    title_str: str = "",
     output_png: str = "figures/reliability_diagram.png",
 ):
-    """
-    Plots a 2-Column Reliability Diagram:
-    - Panel (a): Niño 3.4 Region (5°S–5°N, 170°W–120°W)
-    - Panel (b): High-Skill Domain (ACC >= 0.3) or Global Baseline
-    """
-    main_title = title if title else (title_str if title_str else "Upper-Tercile Event Reliability (>67th Percentile)")
-    second_label = rel_dict.get("second_label", "Global Domain")
+    main_title = title if title else "Upper-Tercile Event Reliability Diagram"
+    second_label = rel_dict.get("second_label", "High-Skill Domain")
 
-    fig = plt.figure(figsize=(13.5, 7.5))
-    gs = fig.add_gridspec(2, 2, height_ratios=[3, 1], hspace=0.10, wspace=0.20, top=0.88, bottom=0.10, left=0.07, right=0.96)
+    fig = plt.figure(figsize=(13.5, 7.8))
+    gs = fig.add_gridspec(2, 2, height_ratios=[3, 1], hspace=0.12, wspace=0.20, top=0.88, bottom=0.10, left=0.07, right=0.96)
 
     ax1_top = fig.add_subplot(gs[0, 0])
     ax1_bot = fig.add_subplot(gs[1, 0], sharex=ax1_top)
@@ -38,19 +32,52 @@ def plot_reliability_diagram(
     ]
 
     for ax_top, ax_bot, rdata, panel_title in panels:
-        # --- Top Subpanel: Reliability Curve ---
-        ax_top.plot([0, 1], [0, 1], "k--", linewidth=1.2, label="Perfect Reliability (1:1)", zorder=2)
-        ax_top.plot(rdata["prob_pred_raw"], rdata["prob_obs_raw"], "o--", color="#d95f02", linewidth=2, markersize=6, label="Raw Model", zorder=4)
-        ax_top.plot(rdata["prob_pred_cal"], rdata["prob_obs_cal"], "s-", color="#1b9e77", linewidth=2.2, markersize=6, label="Calibrated Model", zorder=5)
+        base_rate = rdata.get("base_rate", 0.333)
+        x_pts = np.linspace(0.0, 1.0, 100)
+        no_skill_line = 0.5 * x_pts + 0.5 * base_rate
 
+        # --- No-Skill Region Shading (where BSS < 0) ---
+        ax_top.fill_between(x_pts, base_rate, no_skill_line, where=(x_pts >= base_rate), color="#feebe8", alpha=0.5, zorder=1)
+        ax_top.fill_between(x_pts, no_skill_line, base_rate, where=(x_pts <= base_rate), color="#feebe8", alpha=0.5, zorder=1)
+
+        # Reference Lines
+        ax_top.plot([0, 1], [0, 1], "k--", linewidth=1.2, label="Perfect Reliability (1:1)", zorder=2)
+        ax_top.axhline(base_rate, color="gray", linestyle=":", linewidth=1.0, label=f"Climatology ({base_rate:.2f})", zorder=2)
+        ax_top.plot(x_pts, no_skill_line, color="#d95f02", linestyle=":", linewidth=1.0, alpha=0.7, label="No-Skill Boundary (BSS=0)", zorder=2)
+
+        # Label "No Skill" in shaded zone
+        ax_top.text(0.85, base_rate + 0.04, "No Skill", fontsize=8.5, color="#b2182b", fontweight="bold", alpha=0.8, ha="center")
+
+        if rdata.get("valid_count", 0) > 0:
+            # Curve Plots
+            ax_top.plot(rdata["prob_pred_raw"], rdata["prob_obs_raw"], "o--", color="#d95f02", linewidth=2, markersize=6, label="Raw Model", zorder=4)
+            ax_top.plot(rdata["prob_pred_cal"], rdata["prob_obs_cal"], "s-", color="#1b9e77", linewidth=2.2, markersize=6, label="Calibrated Model", zorder=5)
+
+            # --- Text Annotation Box for BSS, REL, RES ---
+            rel_r, res_r, bss_r = rdata.get("rel_raw", np.nan), rdata.get("res_raw", np.nan), rdata.get("bss_raw", np.nan)
+            rel_c, res_c, bss_c = rdata.get("rel_cal", np.nan), rdata.get("res_cal", np.nan), rdata.get("bss_cal", np.nan)
+
+            raw_txt = f"Raw:  BSS={bss_r:.3f} | REL={rel_r:.3f} | RES={res_r:.3f}"
+            cal_txt = f"Cal:   BSS={bss_c:.3f} | REL={rel_c:.3f} | RES={res_c:.3f}"
+
+            ax_top.text(
+                0.04, 0.62, raw_txt, transform=ax_top.transAxes, fontsize=8.0,
+                fontfamily="monospace", color="#d95f02", fontweight="bold",
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.85, edgecolor="none")
+            )
+            ax_top.text(
+                0.04, 0.56, cal_txt, transform=ax_top.transAxes, fontsize=8.0,
+                fontfamily="monospace", color="#1b9e77", fontweight="bold",
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.85, edgecolor="none")
+            )
         ax_top.set_xlim([0.0, 1.0])
         ax_top.set_ylim([0.0, 1.0])
         ax_top.grid(True, linestyle=":", alpha=0.5)
         ax_top.set_title(panel_title, fontsize=10.5, fontweight="bold", pad=8)
-        ax_top.legend(loc="upper left", frameon=True, fontsize=8.5)
+        ax_top.legend(loc="upper left", frameon=True, fontsize=8.0)
 
-        # --- Bottom Subpanel: Sharpness / Frequency Histogram ---
-        width = 0.03
+        # --- Bottom Subpanel: Linear Scale Histogram ---
+        width = 0.035
         centers = rdata["bin_centers"]
         t_raw, t_cal = np.sum(rdata["counts_raw"]), np.sum(rdata["counts_cal"])
 
@@ -63,13 +90,10 @@ def plot_reliability_diagram(
         ax_bot.set_xlabel("Forecasted Probability Bin", fontsize=9.5, fontweight="bold")
         ax_bot.grid(True, linestyle=":", alpha=0.5)
 
-        # Safe Log Scale handling: Only log-scale if positive values exist
-        has_positive_values = np.any(freq_raw > 0) or np.any(freq_cal > 0)
-        if has_positive_values:
-            ax_bot.set_yscale("log")
-            ax_bot.set_ylim([0.1, 100.0])
-        else:
-            ax_bot.set_ylim([0.0, 100.0])
+        # Non-log Linear Scale
+        ax_bot.set_yscale("linear")
+        max_y = max(np.max(freq_raw) if len(freq_raw) > 0 else 0, np.max(freq_cal) if len(freq_cal) > 0 else 0, 10.0)
+        ax_bot.set_ylim([0.0, min(100.0, max_y * 1.15)])
 
     ax1_top.set_ylabel("Observed Relative Frequency", fontsize=9.5, fontweight="bold")
     ax1_bot.set_ylabel("Frequency (%)", fontsize=8.5, fontweight="bold")

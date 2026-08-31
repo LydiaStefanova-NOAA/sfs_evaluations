@@ -70,4 +70,4 @@ def compute_recalibration_metrics(
     pct_mse_reduction_da.attrs["long_name"] = "MSE Skill Score MSESS (%)"
 
     logger.info("✅ Verification metrics computation complete!")
-    return alpha_da, beta_da, pct_mse_reduction_da
+    return alpha_da, beta_da, pct_mse_reduction_da, mse_raw, mse_cal

@@ -68,7 +68,93 @@ def plot_scaling_factors_map(
     plt.savefig(output_png, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
+import os
+import logging
+import numpy as np
+import xarray as xr
+import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
 
+logger = logging.getLogger(__name__)
+
+
+def plot_mse_comparison_map(
+    mse_raw_da: xr.DataArray,
+    mse_cal_da: xr.DataArray,
+    title: str = "Ensemble Mean MSE & Recalibration Difference",
+    output_png: str = "figures/mse_comparison.png",
+):
+    """
+    Plots Raw MSE alongside a direct Difference Map (Calibrated - Raw).
+    Negative values (Teal) indicate error reduction (calibration succeeded).
+    Positive values (Bricky Red) indicate error increase (calibration degraded).
+    """
+    fig, axes = plt.subplots(
+        1, 2, figsize=(14, 5.5),
+        subplot_kw={"projection": ccrs.Robinson(central_longitude=180)}
+    )
+
+    lons = mse_raw_da["lon"].values
+    lats = mse_raw_da["lat"].values
+
+    # 1. Panel (a): Raw MSE (capped at 95th percentile to prevent polar saturation)
+    vmax_raw = float(np.nanpercentile(mse_raw_da.values, 95))
+    if np.isnan(vmax_raw) or vmax_raw <= 0:
+        vmax_raw = 1.0
+
+    axes[0].set_global()
+    axes[0].add_feature(cfeature.COASTLINE, linewidth=0.6, edgecolor="#333333")
+    mesh0 = axes[0].pcolormesh(
+        lons, lats, mse_raw_da.values,
+        transform=ccrs.PlateCarree(),
+        cmap=plt.cm.YlOrRd,
+        vmin=0.0,
+        vmax=vmax_raw,
+        shading="auto",
+    )
+    axes[0].set_title("(a) Raw Ensemble Mean MSE", fontsize=11, fontweight="bold", pad=8)
+    cbar0_ax = fig.add_axes([0.13, 0.12, 0.33, 0.03])
+    cbar0 = fig.colorbar(mesh0, cax=cbar0_ax, orientation="horizontal", extend="max")
+    cbar0.set_label("Raw MSE", fontsize=9, fontweight="bold")
+
+    # 2. Panel (b): Calibrated − Raw Difference (New − Old)
+    mse_diff = mse_cal_da - mse_raw_da
+    diff_vals = mse_diff.values
+
+    vlim = float(np.nanpercentile(np.abs(diff_vals), 98))
+    if np.isnan(vlim) or vlim <= 0:
+        vlim = 0.5
+
+    # Custom Colorblind-Safe Palette: Teal (negative / improved) -> White (neutral) -> Bricky Red (positive / degraded)
+    teal_brick_cmap = LinearSegmentedColormap.from_list(
+        "teal_brick",
+        ["#1b9e77", "#80cdb1", "#f7f7f7", "#f4a582", "#b2182b"]
+    )
+
+    axes[1].set_global()
+    axes[1].add_feature(cfeature.COASTLINE, linewidth=0.6, edgecolor="#333333")
+    mesh1 = axes[1].pcolormesh(
+        lons, lats, diff_vals,
+        transform=ccrs.PlateCarree(),
+        cmap=teal_brick_cmap,
+        vmin=-vlim,
+        vmax=vlim,
+        shading="auto",
+    )
+    axes[1].set_title("(b) MSE Difference (Calibrated − Raw)", fontsize=11, fontweight="bold", pad=8)
+    cbar1_ax = fig.add_axes([0.54, 0.12, 0.33, 0.03])
+    cbar1 = fig.colorbar(mesh1, cax=cbar1_ax, orientation="horizontal", extend="both")
+    cbar1.set_label("ΔMSE: Calibrated − Raw (Teal = Improved, Red = Worse)", fontsize=9, fontweight="bold")
+
+    fig.suptitle(title, fontsize=12, fontweight="bold", y=0.96)
+    plt.subplots_adjust(bottom=0.22, top=0.88, wspace=0.10)
+
+    os.makedirs(os.path.dirname(output_png), exist_ok=True)
+    plt.savefig(output_png, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    logger.info(f"✅ MSE difference map saved to '{output_png}'!")
 def plot_msess_map(
     pct_mse_reduction_da: xr.DataArray,
     title: str = "",

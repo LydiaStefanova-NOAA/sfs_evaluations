@@ -273,7 +273,7 @@ def run_variance_diagnostic_cli(
     # Step 8: Verification & Recalibration Suite (acc_varobs mode only)
     if nvr_method == "acc_varobs":
         from metrics.verification import compute_recalibration_metrics
-        from viz.spatial_verification import plot_scaling_factors_map, plot_msess_map
+        from viz.spatial_verification import plot_scaling_factors_map, plot_msess_map, plot_mse_comparison_map
         from metrics.ser import compute_ser_before_after
         from viz.spatial_ser import plot_ser_comparison_map
         #from metrics.reliability import compute_reliability_curve
@@ -281,7 +281,8 @@ def run_variance_diagnostic_cli(
         from viz.plot_reliability import plot_reliability_diagram
 
         logger.info("Step 8: Generating Section 5 verification & recalibration plots...")
-        alpha_da, beta_da, pct_mse_reduction_da = compute_recalibration_metrics(
+
+        alpha_da, beta_da, pct_mse_reduction_da, mse_raw_da, mse_cal_da = compute_recalibration_metrics(
             sfs_anom=sfs_anom_da,
             obs_anom=obs_anom_da,
             svr_da=svr_da,
@@ -307,8 +308,16 @@ def run_variance_diagnostic_cli(
             title=make_title("Global Forecast Skill Payoff (MSESS)"),
             output_png=msess_png,
         )
+        # 8c) Raw vs Calibrated MSE Comparison Map
+        mse_png = f"{verif_prefix}_mse_comparison.png"
+        plot_mse_comparison_map(
+            mse_raw_da=canonicalize_lonlat(mse_raw_da),
+            mse_cal_da=canonicalize_lonlat(mse_cal_da),
+            title=make_title("Ensemble Mean MSE Before & After Recalibration"),
+            output_png=mse_png,
+        )
 
-        # 8c) SER Before/After Comparison Map
+        # 8d) SER Before/After Comparison Map
         ser_raw, ser_cal = compute_ser_before_after(
             sfs_anom=sfs_anom_da,
             obs_anom=obs_anom_da,
@@ -323,7 +332,7 @@ def run_variance_diagnostic_cli(
             output_png=ser_png,
         )
 
-        # Step 8d in breakdown.py
+        # Step 8e in breakdown.py
         rel_png = f"{verif_prefix}_reliability_tercile.png"
         plot_reliability_diagram(
             rel_dict=compute_nino34_reliability_curves(
